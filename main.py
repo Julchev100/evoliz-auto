@@ -301,6 +301,16 @@ with m1:
         save_param_local(st.session_state.nr_v62)
         st.success(f"Paramètres sauvegardés dans {PARAM_PATH}")
 
+    # Téléchargement des paramètres
+    if not st.session_state.nr_v62.empty:
+        st.download_button(
+            "📥 Télécharger les paramètres (CSV)",
+            data=st.session_state.nr_v62.to_csv(index=False),
+            file_name="param_local.csv",
+            mime="text/csv",
+            key="btn_download_param"
+        )
+
     if os.path.exists(PARAM_PATH):
         st.caption(f"📁 Fichier local : {PARAM_PATH}")
 

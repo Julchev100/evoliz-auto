@@ -1,7 +1,6 @@
 .evoliz_creds.json
 .last_balance_path.txt
 .api_diag_raw.json
-param_local.csv
 __pycache__/
 *.pyc
 .streamlit/

@@ -1,0 +1,129 @@
+Racine,Libellé,ACHAT,VENTE,ENTRÉE BQ,SORTIE BQ
+1,Capital et réserves,False,False,False,False
+101,Capital,False,False,True,False
+1012,C,False,False,False,False
+102,Fonds fiduciaires,False,False,False,False
+104,Primes liées au capital social,False,False,False,False
+105,Ecarts de réévaluation ,False,False,False,False
+106,Réserves,False,False,False,False
+1061,Réserve légale ,False,False,False,False
+107,Ecart d'équivalence,False,False,False,False
+108,Compte de l'exploitant,False,False,True,True
+109,Actionnaires : capital souscrit - non appelé ,False,False,False,False
+11,Report à nouveau (solde créditeur ou débiteur) ,False,False,False,False
+12,Résultat de l'exercice (bénéfice ou perte) ,False,False,False,False
+13,Subventions d'investissement,False,False,True,False
+14,Provisions réglementées,False,False,False,False
+15,Provisions,False,False,False,False
+16,Emprunts et dettes assimilées,False,False,False,True
+168,Intérêts courus,False,False,False,False
+17,Dettes rattachées à des participations ,False,False,True,True
+1788,Intérêts courus,False,False,False,False
+18,Comptes de liaison des établissements et sociétés en participation ,False,False,True,True
+20,Immobilisations incorporelles,False,False,False,True
+21,Immobilisations corporelles,True,False,False,False
+22,Immobilisations mises en concession,False,False,False,True
+23,Immobilisations en cours,True,False,False,False
+25,Parts dans des entreprises liées et créances sur des entreprises liées ,True,False,False,True
+26,Participations et créances rattachées à des participations ,True,False,False,True
+27,Autres immobilisations financières ,True,False,False,True
+28,Amortissements des immobilisations,False,False,False,False
+29,Dépréciations des immobilisations ,False,False,False,False
+3,STOCK,False,False,False,False
+40,Fournisseurs et comptes rattachés,False,False,False,False
+4091,Fournisseurs - Avances et acomptes versés sur commandes ,False,False,False,True
+41,Clients et comptes rattachés,False,False,False,False
+419,Clients créditeurs,False,False,True,False
+4191,Clients - Avances et acomptes reçus sur commandes ,False,False,True,False
+42,Personnel et comptes rattachés,False,False,False,True
+428,Personnel - Charges à payer et produits à recevoir,False,False,False,False
+43,Sécurité sociale et autres organismes sociaux ,True,False,False,True
+438,Organismes sociaux - Charges à payer et produits à recevoir ,False,False,False,False
+44,État et autres collectivités publiques ,False,False,False,True
+441,État - Subventions à recevoir,False,False,False,False
+444,Etat - Impôts sur les bénéfices ,False,False,True,True
+445,Etat - Taxes sur le chiffre d'affaires ,False,False,False,False
+4455,Etat - décaisser encaisser,False,False,True,True
+44558,Taxes assimilées à la TVA ,False,False,False,False
+4456,Taxes sur le chiffre d'affaires déductibles ,False,False,False,False
+44562,TVA sur immobilisations,False,False,False,False
+44563,TVA transférée par d'autres entreprises ,False,False,False,False
+44566,TVA sur autres biens et services ,False,False,False,False
+44567,Crédit de TVA à reporter ,False,False,False,False
+44568,Taxes assimilées à la TVA ,False,False,False,False
+4457,Taxes sur le chiffre d'affaires collectées par l'entreprise ,False,False,False,False
+44571,TVA collectée,False,False,False,False
+44578,Taxes assimilées à la TVA ,False,False,False,False
+4458,Taxes sur le chiffre d'affaires à régulariser ou en attente ,False,False,False,False
+44583,Remboursement de taxes sur le chiffre d'affaires demandé ,False,False,True,False
+44584,TVA récupérée d'avance ,False,False,True,False
+44586,Taxes sur le chiffre d'affaires sur factures non parvenues ,False,False,False,False
+44587,Taxes sur le chiffre d'affaires sur factures à établir ,False,False,False,False
+446,Obligations cautionnées,False,False,False,False
+447,"Autres impôts, taxes et versements assimilés ",False,False,False,True
+448,Etat - Charges à payer et produits à recevoir ,False,False,False,False
+449,Quotas d'émission à acquérir,False,False,False,False
+45,Groupe et associés ,False,False,True,True
+4558,Intérêts courus,False,False,False,False
+4588,Intérêts courus,False,False,False,False
+4459,Intérêts à recevoir,False,False,False,False
+46,Débiteurs divers et créditeurs divers ,False,False,True,True
+468,Divers - Charges à payer et produits à recevoir ,False,False,False,False
+47,Comptes transitoires ou d'attente ,False,False,True,True
+48,Comptes de régularisation,False,False,False,False
+49,Dépréciation des comptes de tiers ,False,False,False,False
+5,CLASSE 5,False,False,False,False
+50,Valeurs mobilières de placement ,False,False,True,True
+53,Caisse,False,False,True,False
+58,Virements internes,False,False,True,True
+6,COMPTES DE CHARGES,False,False,False,False
+60,Achats (sauf 603) ,True,False,False,False
+601,Achats stockés - Matières premières (et fournitures) ,True,False,False,False
+603,Variation de stocks,False,False,False,False
+61,Services extérieurs,True,False,False,False
+6132,Locations immobilières ,True,False,False,True
+616,Primes d'assurances,True,False,False,True
+62,Autres services extérieurs ,True,False,False,False
+627,Services bancaires et assimilés ,False,False,True,True
+628,Divers,True,False,False,False
+629,"Rabais, remises et ristournes obtenus sur autres services extérieurs ",True,False,False,False
+63,"Impôts, taxes et versements assimilés ",True,False,False,True
+635110,CFE,False,False,False,False
+64,Charges de personnel,False,False,False,True
+6412,Congés payés,False,False,False,False
+6413,Primes et gratifications ,False,False,False,False
+6414,Indemnités et avantages divers ,False,False,False,False
+6415,Supplément familial,False,False,False,False
+645,Charges de sécurité sociale et de prévoyance ,False,False,False,True
+646,Cotisations sociales personnelles de l'exploitant ,True,False,False,True
+647,Autres charges sociales,True,False,False,True
+648,Autres charges de personnel,True,False,False,True
+65,Autres charges de gestion courante ,True,False,False,False
+654,Pertes sur créances irrécouvrables ,False,False,False,False
+655,Quote-part de résultat sur opérations faites en commun ,False,False,False,False
+656,Pertes de change sur créances commerciales,False,False,False,False
+658,Charges diverses de gestion courante,True,False,False,True
+66,Charges financières,False,False,False,True
+67,Charges exceptionnelles,False,False,False,False
+671,Charges exceptionnelles sur opérations de gestion ,True,False,False,True
+6711,Pénalités sur marchés (et dédits payés sur achats et ventes) ,False,False,False,False
+6712,"Pénalités, amendes fiscales et pénales ",True,False,False,True
+6713,"Dons, libéralités",True,False,False,True
+6788,Charges exceptionnelles diverses,False,False,False,True
+68,"Dotations aux amortissements, aux dépréciations et aux provisions",False,False,False,False
+681,"Dotations aux amortissements, aux dépréciations et aux provisions - Charges d'exploitation",False,False,False,False
+69,Participation des salariés - Impôts sur les bénéfices et assimilés ,False,False,False,False
+70,"Ventes de produits fabriqués, prestations de services, marchandises",False,True,False,False
+71,Production stockée (ou déstockage),False,False,False,False
+72,Production immobilisée,False,False,False,False
+74,Subventions d'exploitation,False,False,True,False
+75,Autres produits de gestion courante ,False,False,True,False
+756,Gains de change sur créances et dettes commerciales,False,False,True,False
+758,Produits divers de gestion courante,False,False,True,False
+76,Produits financiers,False,False,True,False
+77,Produits exceptionnels,False,False,True,False
+78,"Reprises sur amortissements, dépréciations et provisions",False,False,False,False
+79,Transferts de charges,False,False,False,False
+791,Transferts de charges d'exploitation ,False,False,False,False
+796,Transferts de charges financières ,False,False,False,False
+797,Transferts de charges exceptionnelles ,False,False,False,False
