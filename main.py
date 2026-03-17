@@ -117,6 +117,16 @@ def has_movement(row, flux_cols):
             return True
     return False
 
+def has_movement_debit_credit(row, flux_cols):
+    """Vérifie le mouvement uniquement sur les colonnes Débit/Crédit (ignore Solde)."""
+    for c in flux_cols:
+        if "SOLDE" in str(c).upper():
+            continue
+        val = pd.to_numeric(row[c], errors='coerce')
+        if pd.notna(val) and abs(val) > 0:
+            return True
+    return False
+
 def inject_account(code, label, headers):
     try:
         r = requests.post("https://www.evoliz.io/api/v1/accounts",
@@ -481,7 +491,7 @@ with m2:
                 label = str(row[cols[1]]).strip().upper()
                 label_flux = clean_label_tva(label, code)
                 pivot_flux = norm_piv(label_flux)
-                mvt = has_movement(row, flux_cols) if flux_cols else True
+                mvt = has_movement_debit_credit(row, flux_cols) if flux_cols else True
 
                 match_root = next((r for r in sorted_roots if code.startswith(r)), None)
 
