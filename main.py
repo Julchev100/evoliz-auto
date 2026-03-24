@@ -5,11 +5,16 @@ import re
 import unicodedata
 import os
 import ast
+import io
+import json
+import zipfile
 import time
 import threading
+from datetime import datetime as dt_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from openpyxl import Workbook
 
-st.set_page_config(page_title="Evoliz Sync - V10.5", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Banana Import Club", layout="wide", page_icon="🍌")
 
 # --- FONCTIONS DE NETTOYAGE ---
 def to_clean_str(val):
@@ -27,8 +32,8 @@ def norm_piv(s):
     s = re.sub(r'[^A-Z0-9]', '', s)
     return s[:20]
 
-def clean_label_tva(label, code):
-    if str(code).startswith(('2', '6', '7')):
+def clean_label_tva(label, code, do_fusion=True):
+    if do_fusion and str(code).startswith(('2', '6', '7')):
         s = str(label)
         # Supprimer les taux de TVA (20%, 5,5 %, etc.) avec les signes autour (tirets, parenthèses, slashes)
         s = re.sub(r'[\s\-/\(]*\d+[\.,]?\d*\s?%[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
@@ -154,7 +159,7 @@ def patch_evoliz_item(category, item_id, payload, headers, company_id=None):
     except Exception as e:
         return False, str(e)
 
-def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None):
+def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None, vat_rate=None):
     endpoint = FLUX_ENDPOINTS[flux_type]
     # Le code d'une catégorie/affectation est son libellé (tronqué à 50 car pour l'API)
     payload = {"code": label[:50], "label": label}
@@ -163,6 +168,8 @@ def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None):
     if vat_id and not (isinstance(vat_id, float) and pd.isna(vat_id)):
         # L'API Evoliz attend le champ "vataccountid" pour lier un compte TVA
         payload["vataccountid"] = int(vat_id)
+    if vat_rate is not None and flux_type == "ACHAT":
+        payload["vat_rate"] = float(vat_rate)
     # Debug : log du payload envoyé
     _payload_debug = {k: v for k, v in payload.items() if k not in ('code', 'label')}
     try:
@@ -208,7 +215,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
     except Exception as e:
         return False, str(e)
 
-st.title("🛡️ Evoliz Sync — V10.5")
+st.title("🍌 Banana Import Club")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -218,6 +225,33 @@ for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFra
                          ('eraz_items', {})]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+# --- Configuration du perimetre ---
+with st.sidebar:
+    st.header("⚙️ Perimetre d'integration")
+    scope = st.radio("Type de parametrage", ["Parametrage complet", "Ventes seules"], key="scope_mode")
+    st.divider()
+    st.subheader("Modules a activer")
+    if scope == "Parametrage complet":
+        mod_compta = st.checkbox("📂 Comptabilite (Balance, Param, Synchro)", value=True, key="mod_compta")
+    else:
+        mod_compta = False
+    mod_clients = st.checkbox("👥 Injection Clients", value=True, key="mod_clients")
+    mod_articles = st.checkbox("📦 Articles", value=True, key="mod_articles")
+    mod_factures = st.checkbox("🧾 Factures & Avoirs", value=scope == "Parametrage complet", key="mod_factures")
+    if mod_compta:
+        with st.expander("📂 Parametres comptables", expanded=False):
+            _f_param_sb = st.file_uploader("Importer un fichier parametres", type=["xlsm", "xlsx", "xls"], key="imp_param_sb", label_visibility="collapsed")
+            if _f_param_sb: st.session_state["imp_file_param"] = _f_param_sb
+            show_param = st.checkbox("Voir les parametres comptables", value=False, key="show_param")
+            fusion_tva = st.checkbox("Fusionner classif. par taux TVA", value=True, key="fusion_tva",
+                                      help="Si coche, les classifications 6xx/7xx qui ne different que par le taux de TVA sont regroupees en une seule.")
+            tva_achat_rate = st.number_input("Taux TVA achats (%)", value=20.0, step=0.5, min_value=0.0, max_value=100.0, key="tva_achat_rate",
+                                              help="Applique aux classifications d'achat (comptes 2xx/6xx).")
+    else:
+        show_param = False
+        fusion_tva = True
+        tva_achat_rate = 20.0
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDS_PATH = os.path.join(APP_DIR, ".evoliz_creds.json")
@@ -250,12 +284,87 @@ def load_balance_path():
                 return p
     return ""
 
-m2, m1, m4, m6, m7 = st.tabs([
-    "📂 1. Balance & Clés API", "⚙️ 2. Param",
-    "🔍 3. Matrice", "📊 4. Synthèse", "🚀 5. Synchro"
-])
+# Construction dynamique des onglets
+_tab_names = []
+_tab_keys = []
+# Toujours : Connexion API + Import fichiers
+_tab_names.append("🔑 Connexion API"); _tab_keys.append("api")
+_tab_names.append("📁 Import fichiers"); _tab_keys.append("import")
+if mod_compta:
+    if show_param:
+        _tab_names.append("⚙️ Param"); _tab_keys.append("param")
+    _tab_names.append("🔍 Matrice comptable"); _tab_keys.append("matrice")
+if mod_clients:
+    _tab_names.append("👥 Injection Clients"); _tab_keys.append("clients")
+if mod_articles:
+    _tab_names.append("📦 Articles"); _tab_keys.append("articles")
+if mod_factures:
+    _tab_names.append("🧾 Factures & Avoirs"); _tab_keys.append("factures")
 
+_tabs = st.tabs(_tab_names)
+_tab_map = {k: t for k, t in zip(_tab_keys, _tabs)}
 
+# Aliases pour compatibilite avec le code existant
+m2 = _tab_map.get("api", st.container())
+m_import = _tab_map.get("import", st.container())
+m1 = _tab_map.get("param", st.container())
+m4 = _tab_map.get("matrice", st.container())
+m6 = _tab_map.get("synthese", st.container())
+m7 = _tab_map.get("synchro", st.container())
+m_cli = _tab_map.get("clients", st.container())
+m_fac = _tab_map.get("factures", st.container())
+m_art = _tab_map.get("articles", st.container())
+# Flags pour conditionner l'execution du contenu
+_has_param_tab = "param" in _tab_map
+_has_matrice_tab = "matrice" in _tab_map
+_has_synthese_tab = "synthese" in _tab_map
+_has_synchro_tab = "synchro" in _tab_map
+_has_clients_tab = "clients" in _tab_map
+_has_factures_tab = "factures" in _tab_map
+_has_articles_tab = "articles" in _tab_map
+
+# --- Onglet Import fichiers centralise ---
+with m_import:
+    st.subheader("📁 Import des fichiers sources")
+    st.caption("Centralisez ici tous vos fichiers. Ils seront utilises dans les onglets correspondants.")
+
+    if mod_compta:
+        st.markdown("---")
+        st.markdown("#### 📂 Comptabilite")
+        _f_balance = st.file_uploader("Fichier Balance", type=["xlsm", "xlsx", "xls"], key="imp_balance")
+        if _f_balance: st.session_state["imp_file_balance"] = _f_balance
+
+    if mod_clients:
+        st.markdown("---")
+        st.markdown("#### 👥 Clients")
+        _f_clients = st.file_uploader("Fichier clients (Excel, CSV...)", type=["xlsx", "xls", "csv"], key="imp_clients")
+        if _f_clients: st.session_state["imp_file_clients"] = _f_clients
+
+    if mod_factures:
+        st.markdown("---")
+        st.markdown("#### 🧾 Factures")
+        _f_factures = st.file_uploader("Fichier export factures", type=["xlsx", "xls"], key="imp_factures")
+        if _f_factures: st.session_state["imp_file_factures"] = _f_factures
+
+    if mod_articles:
+        st.markdown("---")
+        st.markdown("#### 📦 Articles")
+        _f_articles = st.file_uploader("Fichier export articles", type=["xlsx", "xls"], key="imp_articles")
+        if _f_articles: st.session_state["imp_file_articles"] = _f_articles
+
+    # Resume des fichiers charges
+    st.markdown("---")
+    st.markdown("#### 📋 Fichiers charges")
+    _files_status = []
+    if mod_compta:
+        _files_status.append({"Fichier": "📂 Balance", "Statut": "✅ Charge" if st.session_state.get("imp_file_balance") else "❌ Non charge"})
+    if mod_clients:
+        _files_status.append({"Fichier": "👥 Clients", "Statut": "✅ Charge" if st.session_state.get("imp_file_clients") else "❌ Non charge"})
+    if mod_factures:
+        _files_status.append({"Fichier": "🧾 Factures", "Statut": "✅ Charge" if st.session_state.get("imp_file_factures") else "❌ Non charge"})
+    if mod_articles:
+        _files_status.append({"Fichier": "📦 Articles", "Statut": "✅ Charge" if st.session_state.get("imp_file_articles") else "❌ Non charge"})
+    st.dataframe(pd.DataFrame(_files_status), use_container_width=True, hide_index=True)
 
 
 def load_param_from_excel(file_obj):
@@ -280,49 +389,45 @@ def load_param_local():
         return pd.read_csv(PARAM_PATH)
     return pd.DataFrame()
 
-with m1:
-    st.subheader("⚙️ Racines & Tags de flux")
+# Chargement auto des params (necessaire pour la matrice, meme sans onglet Param visible)
+if st.session_state.nr_v62.empty and os.path.exists(PARAM_PATH):
+    st.session_state.nr_v62 = load_param_local()
+_f_param_loaded = st.session_state.get("imp_file_param")
+if _f_param_loaded:
+    try:
+        _xl_p = pd.ExcelFile(_f_param_loaded)
+        if "Param" in _xl_p.sheet_names:
+            st.session_state.nr_v62 = load_param_from_excel(_f_param_loaded)
+            save_param_local(st.session_state.nr_v62)
+    except Exception:
+        pass
 
-    # Chargement auto depuis le fichier local au démarrage
-    if st.session_state.nr_v62.empty and os.path.exists(PARAM_PATH):
-        st.session_state.nr_v62 = load_param_local()
+if show_param:
+    with m1:
+        st.subheader("⚙️ Racines & Tags de flux")
 
-    # Import depuis Excel
-    f_param = st.file_uploader("Importer depuis un Excel (onglet Param)", type=['xlsm', 'xlsx', 'xls'], key="f_param_import")
-    if f_param:
-        try:
-            xl_p = pd.ExcelFile(f_param)
-            if "Param" in xl_p.sheet_names:
-                st.session_state.nr_v62 = load_param_from_excel(f_param)
-                save_param_local(st.session_state.nr_v62)
-                st.success(f"{len(st.session_state.nr_v62)} racines importées et sauvegardées localement")
-            else:
-                st.error("Onglet 'Param' introuvable dans ce fichier")
-        except Exception as e:
-            st.error(f"Erreur de lecture : {e}")
-
-    # Affichage / édition
-    st.session_state.nr_v62 = st.data_editor(
-        st.session_state.nr_v62, num_rows="dynamic", use_container_width=True
-    )
-
-    # Sauvegarde manuelle après édition
-    if st.button("💾 Sauvegarder les paramètres", key="btn_save_param"):
-        save_param_local(st.session_state.nr_v62)
-        st.success(f"Paramètres sauvegardés dans {PARAM_PATH}")
-
-    # Téléchargement des paramètres
-    if not st.session_state.nr_v62.empty:
-        st.download_button(
-            "📥 Télécharger les paramètres (CSV)",
-            data=st.session_state.nr_v62.to_csv(index=False),
-            file_name="param_local.csv",
-            mime="text/csv",
-            key="btn_download_param"
+        # Affichage / édition
+        st.session_state.nr_v62 = st.data_editor(
+            st.session_state.nr_v62, num_rows="dynamic", use_container_width=True
         )
 
-    if os.path.exists(PARAM_PATH):
-        st.caption(f"📁 Fichier local : {PARAM_PATH}")
+        # Sauvegarde manuelle après édition
+        if st.button("💾 Sauvegarder les paramètres", key="btn_save_param"):
+            save_param_local(st.session_state.nr_v62)
+            st.success(f"Paramètres sauvegardés dans {PARAM_PATH}")
+
+        # Téléchargement des paramètres
+        if not st.session_state.nr_v62.empty:
+            st.download_button(
+                "📥 Télécharger les paramètres (CSV)",
+                data=st.session_state.nr_v62.to_csv(index=False),
+                file_name="param_local.csv",
+                mime="text/csv",
+                key="btn_download_param"
+            )
+
+        if os.path.exists(PARAM_PATH):
+            st.caption(f"📁 Fichier local : {PARAM_PATH}")
 
 with m2:
     # --- Clés API ---
@@ -360,7 +465,7 @@ with m2:
                     except:
                         pass
                 st.session_state.company_id_105 = cid
-                with st.spinner("Lecture des données Evoliz..."):
+                with st.spinner("Lecture des données comptables Evoliz..."):
                     st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", h)
                     st.session_state.ev_data_105 = {
                         "ACHAT": fetch_evoliz_data("purchase-classifications", h),
@@ -368,35 +473,75 @@ with m2:
                         "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", h),
                         "SORTIE BQ": fetch_evoliz_data("purchase-affectations", h),
                     }
-                st.success(f"Connecté à Evoliz (company: {cid})")
+                # Lecture clients, articles, factures
+                _base = f"https://www.evoliz.io/api/v1/companies/{cid}" if cid else "https://www.evoliz.io/api/v1"
+                with st.spinner("Lecture des clients Evoliz..."):
+                    _ev_clients = []; _pg = 1
+                    while True:
+                        _r = requests.get(f"{_base}/clients", headers=h, params={"per_page": 100, "page": _pg}, timeout=15)
+                        if _r.status_code != 200: break
+                        _d = _r.json(); _ev_clients.extend(_d.get("data", []))
+                        if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                        _pg += 1
+                    st.session_state["ev_clients_raw"] = _ev_clients
+                with st.spinner("Lecture des articles Evoliz..."):
+                    _ev_articles = []; _pg = 1
+                    while True:
+                        _r = requests.get(f"{_base}/articles", headers=h, params={"per_page": 100, "page": _pg}, timeout=15)
+                        if _r.status_code != 200: break
+                        _d = _r.json(); _ev_articles.extend(_d.get("data", []))
+                        if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                        _pg += 1
+                    st.session_state["ev_articles_raw"] = _ev_articles
+                with st.spinner("Lecture des factures Evoliz (30 derniers jours)..."):
+                    from datetime import timedelta
+                    _date_from = (dt_datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                    _ev_invoices = []; _pg = 1
+                    while True:
+                        _r = requests.get(f"{_base}/invoices", headers=h, params={"per_page": 100, "page": _pg, "created_after": _date_from}, timeout=15)
+                        if _r.status_code != 200: break
+                        _d = _r.json(); _ev_invoices.extend(_d.get("data", []))
+                        if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                        _pg += 1
+                    st.session_state["ev_invoices_raw"] = _ev_invoices
+                st.success(f"Connecté à Evoliz (company: {cid}) — {len(_ev_clients)} clients, {len(_ev_articles)} articles, {len(_ev_invoices)} factures (30j)")
             elif r_log:
                 st.error(f"Échec login : HTTP {r_log.status_code}")
 
-    if st.session_state.ev_acc_105:
-        with st.expander("📊 Données lues depuis Evoliz"):
-            st.metric("Comptes (PCC)", len(st.session_state.ev_acc_105))
-            c1, c2 = st.columns(2)
-            c1.metric("Achats", count_unique(st.session_state.ev_data_105["ACHAT"]))
-            c2.metric("Ventes", count_unique(st.session_state.ev_data_105["VENTE"]))
-            c1.metric("Entrées BQ", count_unique(st.session_state.ev_data_105["ENTRÉE BQ"]))
-            c2.metric("Sorties BQ", count_unique(st.session_state.ev_data_105["SORTIE BQ"]))
+    _has_any_data = (st.session_state.ev_acc_105
+                      or st.session_state.get("ev_clients_raw")
+                      or st.session_state.get("ev_articles_raw")
+                      or st.session_state.get("ev_invoices_raw"))
+    if _has_any_data:
+        with st.expander("📊 Données lues depuis Evoliz", expanded=True):
+            cc1, cc2, cc3 = st.columns(3)
+            cc1.metric("👥 Clients", len(st.session_state.get("ev_clients_raw", [])))
+            cc2.metric("📦 Articles", len(st.session_state.get("ev_articles_raw", [])))
+            cc3.metric("🧾 Factures (30j)", len(st.session_state.get("ev_invoices_raw", [])))
+            if mod_compta:
+                st.divider()
+                st.caption("Pre-comptabilite")
+                cp1, cp2, cp3, cp4, cp5 = st.columns(5)
+                cp1.metric("Comptes", len(st.session_state.get("ev_acc_105", {})))
+                cp2.metric("Achats", count_unique(st.session_state.get("ev_data_105", {}).get("ACHAT", {})))
+                cp3.metric("Ventes", count_unique(st.session_state.get("ev_data_105", {}).get("VENTE", {})))
+                cp4.metric("Entrees BQ", count_unique(st.session_state.get("ev_data_105", {}).get("ENTRÉE BQ", {})))
+                cp5.metric("Sorties BQ", count_unique(st.session_state.get("ev_data_105", {}).get("SORTIE BQ", {})))
 
+# Le code Balance s'execute dans l'onglet Import fichiers (section compta)
+with m_import:
+  if mod_compta:
     # --- Balance ---
     st.divider()
-    st.subheader("📂 Balance")
-    last_bal_path = load_balance_path()
-    bal_mode = st.radio("Source Balance", ["📁 Fichier local (chemin)", "📤 Upload"], horizontal=True, key="bal_mode")
-
-    f105 = None
-    if bal_mode == "📁 Fichier local (chemin)":
-        bal_path = st.text_input("Chemin du fichier Balance", value=last_bal_path, key="bal_path_input")
-        if bal_path and os.path.exists(bal_path):
-            save_balance_path(bal_path)
-            f105 = bal_path
-        elif bal_path:
-            st.error(f"Fichier introuvable : {bal_path}")
-    else:
-        f105 = st.file_uploader("Fichier Balance", type=['xlsm', 'xlsx', 'xls'], key="f105_v62")
+    st.subheader("📂 Analyse Balance")
+    f105 = st.session_state.get("imp_file_balance")
+    if not f105:
+        # Fallback : chemin local
+        last_bal_path = load_balance_path()
+        if last_bal_path:
+            f105 = last_bal_path
+    if not f105:
+        st.info("Importez un fichier Balance ci-dessus.")
 
     if f105:
         xl = None
@@ -447,9 +592,9 @@ with m2:
 
         col_tva1, col_tva2 = st.columns(2)
         with col_tva1:
-            sel_tva_6 = st.selectbox("TVA Achats (comptes 6xx)", options_4456, key="sel_tva_6")
+            sel_tva_6 = st.selectbox("TVA Deductible (comptes 6xx)", options_4456, key="sel_tva_6")
         with col_tva2:
-            sel_tva_2 = st.selectbox("TVA Investissements (comptes 2xx)", options_4456, key="sel_tva_2")
+            sel_tva_2 = st.selectbox("TVA deductible sur immos (comptes 2xx)", options_4456, key="sel_tva_2")
 
         vat_label_6, vat_label_2 = None, None
         vat_api_id_6, vat_api_id_2 = None, None
@@ -465,7 +610,13 @@ with m2:
             vat_api_id_2 = ev_tva_2['id'] if ev_tva_2 else None
 
         st.divider()
-        if st.button("🔍 ANALYSER", use_container_width=True, key="btn_analyse_105"):
+        # Auto-analyse si fichier charge et pas encore analyse, ou bouton manuel
+        _bal_file_id = str(f105) if isinstance(f105, str) else f105.name + str(f105.size)
+        _bal_already = st.session_state.get("_bal_analysed_id") == _bal_file_id
+        _bal_auto = not _bal_already and not st.session_state.nr_v62.empty
+        _bal_manual = st.button("🔍 Re-ANALYSER", use_container_width=True, key="btn_analyse_105")
+        if _bal_auto or _bal_manual:
+            st.session_state["_bal_analysed_id"] = _bal_file_id
             st.session_state.vat_label_6 = vat_label_6
             st.session_state.vat_label_2 = vat_label_2
             st.session_state.vat_api_id_6 = vat_api_id_6
@@ -489,7 +640,7 @@ with m2:
             for _, row in df_bal.iterrows():
                 code = to_clean_str(row[cols[0]])
                 label = str(row[cols[1]]).strip().upper()
-                label_flux = clean_label_tva(label, code)
+                label_flux = clean_label_tva(label, code, fusion_tva)
                 pivot_flux = norm_piv(label_flux)
                 mvt = has_movement_debit_credit(row, flux_cols) if flux_cols else True
 
@@ -621,9 +772,12 @@ with m2:
             st.success(f"Analyse terminée : {len(results)} lignes traitées, {len(rejets)} rejetées → voir onglets Matrice / Rejetées")
 
 with m4:
-    sub_matrice, sub_audit, sub_rejets, sub_eraz = st.tabs([
-        "📋 Matrice", "🔎 Audit MAJ", "🚫 Rejetées", "🧹 ERAZ"
+    sub_rejets, sub_eraz, sub_audit, sub_matrice, sub_synthese, sub_synchro = st.tabs([
+        "🚫 Rejetees", "🧹 Suppressions", "🔎 Mises a jour", "📋 Matrice", "📊 Synthese injection", "🚀 Injection"
     ])
+    # Reassigner m6/m7 pour que le code existant ecrive dans les bons sous-onglets
+    m6 = sub_synthese
+    m7 = sub_synchro
 
     with sub_matrice:
         if not st.session_state.audit_matrix_105.empty:
@@ -896,9 +1050,13 @@ with m7:
                 rate_wait()
                 return inject_account(code, label, hdrs)
 
-            def _add_flux_rate(flux_type, code, label, hdrs, vat_id=None, acc_id=None):
+            def _add_flux_rate(flux_type, code, label, hdrs, vat_id=None, acc_id=None, compte_code=None):
                 rate_wait()
-                return inject_flux(flux_type, code, label, hdrs, vat_id=vat_id, acc_id=acc_id)
+                # Appliquer le taux de TVA pour les classifications d'achat (comptes 2xx/6xx)
+                _vr = None
+                if flux_type == "ACHAT" and compte_code and str(compte_code).startswith(('2', '6')):
+                    _vr = tva_achat_rate
+                return inject_flux(flux_type, code, label, hdrs, vat_id=vat_id, acc_id=acc_id, vat_rate=_vr)
 
             # --- 1. DELETE orphelins (parallèle par paquets) ---
             if eraz_items:
@@ -956,6 +1114,9 @@ with m7:
                             ev_a = acc_lookup.get(norm_piv(row['N°']))
                             if ev_a:
                                 payload['accountid'] = ev_a['id']
+                        # Ajouter vat_rate pour les classifications d'achat (comptes 2xx/6xx)
+                        if isinstance(payload, dict) and flux == "ACHAT" and str(row['N°']).startswith(('2', '6')):
+                            payload['vat_rate'] = float(tva_achat_rate)
                         patch_tasks.append((flux, row['N°'], patch_info, payload))
             if patch_tasks:
                 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -1003,12 +1164,12 @@ with m7:
                             if a.get('code', '').strip() == code_str:
                                 row_acc_id = a['id']
                                 break
-                    flux_tasks.append((flux, row['N°'], label_for_flux, row_vat, row_acc_id))
+                    flux_tasks.append((flux, row['N°'], label_for_flux, row_vat, row_acc_id, row['N°']))
             if flux_tasks:
                 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-                    futures = {pool.submit(_add_flux_rate, t[0], t[1], t[2], headers, vat_id=t[3], acc_id=t[4]): t for t in flux_tasks}
+                    futures = {pool.submit(_add_flux_rate, t[0], t[1], t[2], headers, vat_id=t[3], acc_id=t[4], compte_code=t[5]): t for t in flux_tasks}
                     for f in as_completed(futures):
-                        flux, code, lbl, _, _ = futures[f]
+                        flux, code, lbl, _, _, _ = futures[f]
                         ok, resp = f.result()
                         log.append({"Action": "➕ ADD", "Type": flux, "Code": code,
                                     "Libellé": lbl, "Résultat": "✅" if ok else "❌", "Détail": str(resp)[:120]})
@@ -1082,7 +1243,7 @@ with m7:
                             pivot_label = norm_piv(d['label'])
                             api_pivots_unique.add(pivot_label)
                     matrice_pivots = set(
-                        norm_piv(clean_label_tva(r['Libellé'], r['N°']))
+                        norm_piv(clean_label_tva(r['Libellé'], r['N°'], fusion_tva))
                         for _, r in df_m[df_m[cat].isin(['✅', '➕', '🔄'])].iterrows()
                     )
 
@@ -1120,7 +1281,7 @@ with m7:
                             seen_ids.add(d['id'])
                             api_labels_by_pivot[norm_piv(d['label'])] = d
                     matrice_pivots = {
-                        norm_piv(clean_label_tva(r['Libellé'], r['N°'])): r.get('LibFlux', r['Libellé'])
+                        norm_piv(clean_label_tva(r['Libellé'], r['N°'], fusion_tva)): r.get('LibFlux', r['Libellé'])
                         for _, r in df_m[df_m[cat].isin(['✅', '➕', '🔄'])].iterrows()
                     }
 
@@ -1158,3 +1319,1241 @@ with m7:
         st.warning("Connectez-vous à l'API Evoliz d'abord (onglet Connexion API)")
     else:
         st.info("Lancez l'analyse d'abord (onglet Balance)")
+
+
+# =========================================================
+# BASCULE MEG -> EVOLIZ
+# =========================================================
+
+ISO2_MAP = {
+    "AFGHANISTAN": "AF", "ALBANIE": "AL", "ALGERIE": "DZ", "ALLEMAGNE": "DE",
+    "ANDORRE": "AD", "ANGOLA": "AO", "ARABIE SAOUDITE": "SA", "ARGENTINE": "AR",
+    "AUSTRALIE": "AU", "AUTRICHE": "AT", "BELGIQUE": "BE", "BRESIL": "BR",
+    "BULGARIE": "BG", "BURKINA FASO": "BF", "CAMEROUN": "CM", "CANADA": "CA",
+    "CHILI": "CL", "CHINE": "CN", "COLOMBIE": "CO", "COREE DU SUD": "KR",
+    "COSTA RICA": "CR", "COTE D'IVOIRE": "CI", "CROATIE": "HR", "CUBA": "CU",
+    "DANEMARK": "DK", "EGYPTE": "EG", "EMIRATS ARABES UNIS": "AE", "ESPAGNE": "ES",
+    "ESTONIE": "EE", "ETATS-UNIS": "US", "FINLANDE": "FI", "FRANCE": "FR",
+    "GABON": "GA", "GEORGIE": "GE", "GHANA": "GH", "GRECE": "GR",
+    "GUADELOUPE": "GP", "GUATEMALA": "GT", "GUINEE": "GN", "GUYANE FRANCAISE": "GF",
+    "HAITI": "HT", "HONDURAS": "HN", "HONG KONG": "HK", "HONGRIE": "HU",
+    "INDE": "IN", "INDONESIE": "ID", "IRAK": "IQ", "IRAN": "IR", "IRLANDE": "IE",
+    "ISLANDE": "IS", "ISRAEL": "IL", "ITALIE": "IT", "JAMAIQUE": "JM", "JAPON": "JP",
+    "JORDANIE": "JO", "KAZAKHSTAN": "KZ", "KENYA": "KE", "KOWEIT": "KW",
+    "LAOS": "LA", "LETTONIE": "LV", "LIBAN": "LB", "LIBYE": "LY",
+    "LIECHTENSTEIN": "LI", "LITUANIE": "LT", "LUXEMBOURG": "LU", "MACEDOINE": "MK",
+    "MADAGASCAR": "MG", "MALAISIE": "MY", "MALI": "ML", "MALTE": "MT",
+    "MAROC": "MA", "MARTINIQUE": "MQ", "MAURICE": "MU", "MAURITANIE": "MR",
+    "MAYOTTE": "YT", "MEXIQUE": "MX", "MOLDAVIE": "MD", "MONACO": "MC",
+    "MONGOLIE": "MN", "MONTENEGRO": "ME", "MOZAMBIQUE": "MZ", "NAMIBIE": "NA",
+    "NEPAL": "NP", "NICARAGUA": "NI", "NIGER": "NE", "NIGERIA": "NG",
+    "NORVEGE": "NO", "NOUVELLE-ZELANDE": "NZ", "OMAN": "OM", "OUGANDA": "UG",
+    "PAKISTAN": "PK", "PALESTINE": "PS", "PANAMA": "PA", "PARAGUAY": "PY",
+    "PAYS-BAS": "NL", "PEROU": "PE", "PHILIPPINES": "PH", "POLOGNE": "PL",
+    "PORTUGAL": "PT", "QATAR": "QA", "REPUBLIQUE TCHEQUE": "CZ", "REUNION": "RE",
+    "ROUMANIE": "RO", "ROYAUME-UNI": "GB", "RUSSIE": "RU", "SENEGAL": "SN",
+    "SERBIE": "RS", "SINGAPOUR": "SG", "SLOVAQUIE": "SK", "SLOVENIE": "SI",
+    "SOUDAN": "SD", "SRI LANKA": "LK", "SUEDE": "SE", "SUISSE": "CH",
+    "SYRIE": "SY", "TAIWAN": "TW", "TANZANIE": "TZ", "TCHAD": "TD",
+    "THAILANDE": "TH", "TOGO": "TG", "TUNISIE": "TN", "TURQUIE": "TR",
+    "UKRAINE": "UA", "URUGUAY": "UY", "VENEZUELA": "VE", "VIET NAM": "VN",
+    "YEMEN": "YE", "ZAMBIE": "ZM", "ZIMBABWE": "ZW",
+    "GERMANY": "DE", "AUSTRALIA": "AU", "AUSTRIA": "AT", "BELGIUM": "BE",
+    "BRAZIL": "BR", "CANADA": "CA", "CHINA": "CN", "DENMARK": "DK",
+    "SPAIN": "ES", "FINLAND": "FI", "FRANCE": "FR", "GREECE": "GR",
+    "INDIA": "IN", "IRELAND": "IE", "ITALY": "IT", "JAPAN": "JP",
+    "LUXEMBOURG": "LU", "MOROCCO": "MA", "MEXICO": "MX", "NORWAY": "NO",
+    "NETHERLANDS": "NL", "POLAND": "PL", "PORTUGAL": "PT",
+    "UNITED KINGDOM": "GB", "ROMANIA": "RO", "SWEDEN": "SE",
+    "SWITZERLAND": "CH", "TURKEY": "TR", "UNITED STATES": "US", "ENGLAND": "GB",
+}
+
+# Table NAF rev.2 : code -> libelle
+_NAF_PATH = os.path.join(APP_DIR, "naf_rev2.json")
+if os.path.exists(_NAF_PATH):
+    with open(_NAF_PATH, "r", encoding="utf-8") as _f:
+        NAF_LABELS = json.load(_f)
+else:
+    NAF_LABELS = {}
+
+def _naf_label(code):
+    """Retourne le libelle NAF pour un code (ex: '58.29C' -> 'Edition de logiciels applicatifs')."""
+    if not code: return ""
+    c = str(code).strip()
+    if c in NAF_LABELS: return NAF_LABELS[c]
+    # Essayer sans la lettre finale (XX.XX)
+    if len(c) >= 5 and c[:-1] in NAF_LABELS: return NAF_LABELS[c[:-1]]
+    return c  # fallback : retourner le code tel quel
+
+# --- Normalisation forme juridique ---
+# Codes Evoliz : https://evoliz.io/documentation#section/Legal-status-list
+EVOLIZ_LEGAL = {
+    "1": "Association", "2": "Auto entrepreneur", "3": "EIRL",
+    "4": "Entreprise Individuelle", "5": "EURL", "6": "GIE",
+    "7": "Independant - AGESSA", "8": "Independant - Maison des Artistes",
+    "9": "SA", "10": "SARL", "11": "SARL a capital variable",
+    "12": "SAS", "13": "SASU", "14": "SNC", "15": "SELARL",
+    "16": "Profession liberale", "17": "SCI", "18": "SCS",
+    "19": "Societe Civile", "20": "SCM", "21": "SEP", "22": "SCP",
+    "23": "SCOP SA", "24": "SCOP SARL", "25": "SCIC SA", "26": "SCIC SARL",
+    "27": "SELAFA", "28": "SELAS", "29": "SELCA", "30": "SPRL",
+}
+
+# Code INSEE nature_juridique -> label Evoliz
+# Ref: https://www.insee.fr/fr/information/2028129
+_INSEE_TO_EVOLIZ = {
+    # Entrepreneur individuel
+    "1000": "Entreprise Individuelle",
+    # Auto-entrepreneur / micro
+    "1300": "Auto entrepreneur",
+    # EIRL
+    "1400": "EIRL",
+    # GIE
+    "6100": "GIE",
+    # SA a conseil d'admin
+    "5505": "SA", "5510": "SA", "5515": "SA", "5520": "SA",
+    "5522": "SA", "5525": "SA", "5530": "SA", "5531": "SA",
+    "5532": "SA", "5535": "SA", "5538": "SA",
+    # SA a directoire
+    "5605": "SA", "5610": "SA", "5615": "SA", "5620": "SA",
+    "5622": "SA", "5625": "SA", "5630": "SA", "5631": "SA",
+    "5632": "SA", "5635": "SA", "5638": "SA",
+    # SAS
+    "5710": "SAS",
+    # SASU
+    "5720": "SASU",
+    # SARL
+    "5499": "SARL", "5498": "SARL",
+    # EURL
+    "5498": "EURL",
+    # SARL
+    "5410": "SARL", "5415": "SARL", "5422": "SARL",
+    "5426": "SARL", "5430": "SARL", "5431": "SARL",
+    "5432": "SARL", "5442": "SARL", "5443": "SARL",
+    "5451": "SARL", "5453": "SARL", "5454": "SARL",
+    "5455": "SARL", "5458": "SARL", "5459": "SARL",
+    "5460": "SARL",
+    # SNC
+    "5202": "SNC", "5203": "SNC",
+    # SCS
+    "5306": "SCS", "5307": "SCS", "5308": "SCS",
+    # SCI
+    "6540": "SCI",
+    # SCM
+    "6542": "SCM",
+    # SCP
+    "6543": "SCP",
+    # Societe civile
+    "6553": "Societe Civile", "6554": "Societe Civile",
+    "6558": "Societe Civile", "6560": "Societe Civile",
+    # SEP
+    "6539": "SEP",
+    # SELARL
+    "5485": "SELARL",
+    # SELAS
+    "5785": "SELAS",
+    # SELAFA
+    "5585": "SELAFA",
+    # SELCA
+    "5385": "SELCA",
+    # SCOP
+    "5451": "SCOP SARL", "5547": "SCOP SA",
+    # Association
+    "9210": "Association", "9220": "Association", "9221": "Association",
+    "9222": "Association", "9223": "Association", "9224": "Association",
+    "9230": "Association", "9240": "Association", "9260": "Association",
+    # Profession liberale
+    "0000": "Profession liberale",
+}
+
+def _normalize_forme_juridique(value):
+    """Normalise une forme juridique (code INSEE, texte libre) vers un label Evoliz."""
+    if not value:
+        return ""
+    s = str(value).strip()
+
+    # Si c'est un code INSEE numerique
+    if s.isdigit():
+        # Match exact
+        if s in _INSEE_TO_EVOLIZ:
+            return _INSEE_TO_EVOLIZ[s]
+        # Match par prefixe (ex: 5710 -> 57xx)
+        for prefix_len in [4, 3, 2]:
+            prefix = s[:prefix_len]
+            for code, label in _INSEE_TO_EVOLIZ.items():
+                if code.startswith(prefix):
+                    return label
+        return ""  # code INSEE inconnu, vide pour ne pas bloquer l'import
+
+    # Si c'est du texte, essayer de matcher vers un label Evoliz
+    up = s.upper().strip()
+    # Mapping texte courant -> Evoliz
+    _TEXT_MAP = {
+        "SARL": "SARL", "S.A.R.L.": "SARL", "S.A.R.L": "SARL",
+        "SAS": "SAS", "S.A.S.": "SAS", "S.A.S": "SAS",
+        "SASU": "SASU", "S.A.S.U.": "SASU",
+        "SA": "SA", "S.A.": "SA", "S.A": "SA",
+        "EURL": "EURL", "E.U.R.L.": "EURL",
+        "EIRL": "EIRL", "E.I.R.L.": "EIRL",
+        "EI": "Entreprise Individuelle", "ENTREPRISE INDIVIDUELLE": "Entreprise Individuelle",
+        "SNC": "SNC", "S.N.C.": "SNC",
+        "SCI": "SCI", "S.C.I.": "SCI",
+        "SCM": "SCM", "S.C.M.": "SCM",
+        "SCP": "SCP", "S.C.P.": "SCP",
+        "SCS": "SCS", "S.C.S.": "SCS",
+        "SEP": "SEP", "S.E.P.": "SEP",
+        "GIE": "GIE", "G.I.E.": "GIE",
+        "SELARL": "SELARL", "SELAS": "SELAS", "SELAFA": "SELAFA", "SELCA": "SELCA",
+        "SCOP": "SCOP SARL", "SCIC": "SCIC SARL",
+        "SPRL": "SPRL",
+        "ASSOCIATION": "Association", "ASSOC": "Association", "ASSO": "Association",
+        "ASSOCIATION LOI 1901": "Association", "ASSOCIATION DECLAREE": "Association",
+        "AUTO ENTREPRENEUR": "Auto entrepreneur", "AUTO-ENTREPRENEUR": "Auto entrepreneur",
+        "AUTOENTREPRENEUR": "Auto entrepreneur",
+        "MICRO ENTREPRISE": "Auto entrepreneur", "MICRO-ENTREPRISE": "Auto entrepreneur",
+        "MICROENTREPRISE": "Auto entrepreneur",
+        "PROFESSION LIBERALE": "Profession liberale", "PROF. LIBERALE": "Profession liberale",
+        "SOCIETE CIVILE": "Societe Civile",
+        "SOCIETE PAR ACTIONS SIMPLIFIEE": "SAS", "SOCIETE PAR ACTIONS SIMPLIFIEES": "SAS",
+        "SOCIETE A RESPONSABILITE LIMITEE": "SARL",
+        "SOCIETE ANONYME": "SA",
+        "SOCIETE EN NOM COLLECTIF": "SNC",
+        "SOCIETE CIVILE IMMOBILIERE": "SCI",
+        "SOCIETE CIVILE DE MOYENS": "SCM",
+        "SOCIETE CIVILE PROFESSIONNELLE": "SCP",
+        "SOCIETE EN COMMANDITE SIMPLE": "SCS",
+        "GROUPEMENT D'INTERET ECONOMIQUE": "GIE",
+        "ENTREPRISE UNIPERSONNELLE": "EURL",
+    }
+    if up in _TEXT_MAP:
+        return _TEXT_MAP[up]
+    # Recherche partielle : contient un des mots cles
+    for key, val in _TEXT_MAP.items():
+        if key in up:
+            return val
+    # Rien trouve : vide pour ne pas bloquer l'import Evoliz
+    return ""
+
+def _lookup_iso2(country):
+    if not country: return "FR"
+    n = norm_piv(country)
+    for name, code in ISO2_MAP.items():
+        if norm_piv(name) == n: return code
+    for name, code in ISO2_MAP.items():
+        if norm_piv(name) in n or n in norm_piv(name): return code
+    return "FR"
+
+def _make_wb(headers):
+    wb = Workbook(); ws = wb.active; ws.append(headers); return wb, ws
+
+def _wb_bytes(wb):
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf.getvalue()
+
+def _read_meg(f):
+    for engine in [None, "openpyxl", "xlrd"]:
+        try:
+            f.seek(0); return pd.read_excel(f, header=0, engine=engine)
+        except Exception: pass
+    try:
+        f.seek(0); dfs = pd.read_html(f.read(), header=0)
+        if dfs: return dfs[0]
+    except Exception: pass
+    raise ValueError("Impossible de lire ce fichier.")
+
+def _safe_float(v):
+    try: return float(v)
+    except (ValueError, TypeError): return 0.0
+
+def _detect_type_from_name(name):
+    """Analyse un nom pour determiner le type client Evoliz :
+    'Particulier', 'Professionnel' ou 'Administration publique'."""
+    if not name:
+        return "Professionnel"
+    s = name.strip()
+    up = s.upper()
+
+    # --- Administration publique ---
+    admin_markers = [
+        "MAIRIE", "COMMUNE ", "COMMUNAUTE ", "CONSEIL DEPARTEMENTAL",
+        "CONSEIL REGIONAL", "CONSEIL GENERAL", "CONSEIL MUNICIPAL",
+        "REGION ", "DEPARTEMENT ", "PREFECTURE", "SOUS-PREFECTURE",
+        "MINISTERE", "TRESOR PUBLIC", "TRESORERIE", "DGFIP",
+        "LYCEE", "COLLEGE", "ECOLE PUBLIQUE", "UNIVERSITE",
+        "CENTRE HOSPITALIER", "CHU ", "CHR ", "HOPITAL PUBLIC",
+        "CNRS", "INRA", "INSERM", "INSEE", "POLE EMPLOI",
+        "CHAMBRE DE COMMERCE", "CCI ", "CHAMBRE DES METIERS",
+        "CHAMBRE D'AGRICULTURE", "OFFICE PUBLIC", "OPH ",
+        "ETABLISSEMENT PUBLIC", "EPIC ", "EPA ",
+        "CAISSE DES DEPOTS", "CDC ", "CPAM ", "CAF ",
+        "URSSAF", "MSA ", "CARSAT",
+    ]
+    for marker in admin_markers:
+        if marker in up:
+            return "Administration publique"
+
+    # --- Professionnel (societes, structures, commerces) ---
+    pro_markers = [
+        "SARL", "SAS", "SASU", "SA ", "SCI", "SNC", "EURL", "SELARL", "SELAS",
+        "EARL", "GIE", "SCOP", "SCA", "SCS", "SEP", "GAEC", "SELAFA", "SELCA",
+        "EI ", "MICRO", "AUTO-ENTREPRENEUR",
+        "ASSOCIATION", "ASSOC", "FONDATION",
+        "CABINET", "OFFICE", "GROUPE", "HOLDING", "SOCIETE",
+        "PHARMACIE", "CLINIQUE", "LABORATOIRE", "LABO",
+        "BOULANGERIE", "RESTAURANT", "HOTEL", "GARAGE", "PRESSING",
+        "INSTITUT", "AGENCE", "SYNDIC", "COPROPRIETE",
+        "INTERNATIONAL", "SERVICES", "CONSULTING", "CONSEIL",
+        "TRANSPORT", "LOGISTIQUE", "IMMOBILIER",
+        "MUTUELLE", "BANQUE", "CREDIT", "ASSURANCE",
+        "&", " ET FILS", " ET CIE", " ET ASSOCIES", " ET COMPAGNIE",
+        "CHEZ ", "C/O ",
+    ]
+    for marker in pro_markers:
+        if marker in up:
+            return "Professionnel"
+
+    # --- Heuristiques pour Particulier ---
+    # Chiffres dans le nom -> probablement pas une personne
+    if re.search(r'\d', s):
+        return "Professionnel"
+    # Un seul mot -> probablement un nom de societe
+    words = s.split()
+    if len(words) == 1:
+        return "Professionnel"
+    # Plus de 3 mots -> probablement un nom de societe
+    if len(words) > 3:
+        return "Professionnel"
+    # Plus de 35 caracteres
+    if len(s) > 35:
+        return "Professionnel"
+    # 2-3 mots, uniquement des lettres/tirets -> probablement Prenom Nom
+    if all(re.match(r'^[A-Za-z\u00C0-\u00FF\-\']+$', w) for w in words):
+        return "Particulier"
+    return "Professionnel"
+
+def _normalize_type(type_val, nom_societe=""):
+    """Normalise un champ type source vers une valeur Evoliz.
+    Si le champ type n'est pas exploitable, analyse le nom."""
+    if type_val:
+        tv = str(type_val).upper().strip()
+        # Valeurs directement reconnues
+        if tv in ("PRO", "PROFESSIONNEL", "ENTREPRISE", "SOCIETE", "B2B", "PROFESSIONAL"):
+            return "Professionnel"
+        if tv in ("PART", "PARTICULIER", "INDIVIDU", "B2C", "PERSONNE PHYSIQUE", "INDIVIDUAL", "PERSONAL"):
+            return "Particulier"
+        if tv in ("ADMIN", "ADMINISTRATION", "ADMINISTRATION PUBLIQUE", "PUBLIC",
+                   "COLLECTIVITE", "COLLECTIVITE TERRITORIALE", "ETAT"):
+            return "Administration publique"
+        # Valeur non reconnue -> essayer d'analyser le contenu
+        # Certains fichiers mettent le type juridique dans le champ type
+        for marker in ["SARL", "SAS", "SASU", "SA", "SCI", "EURL", "SNC", "GIE"]:
+            if marker in tv:
+                return "Professionnel"
+        for marker in ["MAIRIE", "COMMUNE", "PREFECTURE", "MINISTERE", "LYCEE", "COLLEGE"]:
+            if marker in tv:
+                return "Administration publique"
+    # Type vide ou non exploitable -> analyser le nom
+    return _detect_type_from_name(nom_societe)
+
+def _parse_date(v):
+    if isinstance(v, dt_datetime): return v
+    if pd.isna(v): return ""
+    for fmt in ["%d/%m/%Y", "%Y-%m-%d"]:
+        try: return dt_datetime.strptime(str(v).strip(), fmt)
+        except (ValueError, TypeError): pass
+    return v
+
+H_CLIENT = ["Code *","Date de creation","Societe / Nom *","Type *","Civilite","Forme juridique","Siren","APE / NAF","TVA intracommunautaire","Numero Immatriculation","Banque","RIB","IBAN","BIC","Adresse","Complement d'adresse","Complement d'adresse (suite)","Code postal *","Ville *","Pays","Code pays (ISO 2) *","Siret","Nb adresses livraison","Telephone","Portable","Fax","Site web","Montant de l'encours garanti","Commentaires","Desactive","Taux de penalite","Aucun Taux de penalite","Frais de recouvrement","Taux d'escompte","Aucun Taux d'escompte","Conditions de reglement","Mode de paiement","Duree de validite","Mode de saisie des prix","Taux de TVA","Remise globale","Article d'exoneration","ZRR","Code ZRR","Devise"]
+H_CONTACT = ["Nom Client","Code client *","Civilite","Nom *","Prenom","E-mail","Metier/Fonction","Consentement *","Libelle Telephone","Telephone","Libelle Telephone 2","Telephone 2","Libelle Telephone 3","Telephone 3","Desactive"]
+H_FACTURE = ["N facture externe *","Date facture *","Client","Code client *","Nom adresse de livraison","Code adresse de livraison","Total TVA","Total HT","Total TTC","Total regle","Etat","Date Etat","Date de creation","Objet","Date d'echeance","Date d'execution","Taux de penalite","Frais de recouvrement","Taux d'escompte","Conditions de reglement *","Mode de paiement","Remise globale","Acompte","Nombre de relance","Commentaires","N facture","Annule","Catalogue","Ref.","Designation *","Qte *","Unite","PU HT *","Remise","TVA","Total TVA","Total HT","Classification vente","Code Classification vente","Prix d'achat HT","Createur"]
+H_AVOIR = ["N avoir externe *","Date avoir *","Client","Code client *","Nom adresse de livraison","Code adresse de livraison","Total TVA","Total HT","Total TTC","Etat","Date de creation avoir","Objet","Date d'echeance","Taux de penalite","Frais de recouvrement","Taux d'escompte","Conditions de reglement *","Mode de paiement","Remise globale","Acompte","Commentaires","Annule","Catalogue","Ref.","Designation *","Qte *","Unite","PU HT *","Remise","TVA","Total TVA","Total HT","Classification vente","Code Classification vente","Createur"]
+H_PAIEMENT = ["Facture n *","Date paiement *","Date de creation","Client","Code client","Libelle *","Mode de paiement *","Montant *","Commentaires","Createur"]
+H_ARTICLE = ["Reference *","Nature","Classification vente","Code Classification vente","Designation *","Quantite","Poids par unite","Unite","PU HT","PU TTC","TVA","Saisie en TTC","Prix d'achat HT","Classification achat","Code Classification achat","Coefficient multiplicateur","% Marque","% Marge","Marge brute","Fournisseur","Code fournisseur","Ref. Fournisseur","Article stocke","Qte stockee","Desactive","Createur"]
+
+GABARIT_CLIENT_PATH = os.path.join(APP_DIR, ".gabarit_client_meg.xlsx")
+
+# --- Auto-mapping colonnes ---
+# Champs Evoliz client -> mots-cles pour detection automatique
+_EVOLIZ_FIELD_KEYWORDS = {
+    "Code":                 ["code", "ref", "id client", "identifiant", "numero client", "n client", "code client"],
+    "Societe / Nom":        ["societe", "raison sociale", "nom", "denomination", "entreprise", "client", "name", "company"],
+    "Type":                 ["type", "nature", "categorie"],
+    "Civilite":             ["civilite", "titre", "civ"],
+    "Forme juridique":      ["forme juridique", "statut juridique", "forme legale", "forme jur"],
+    "Siren":                ["siren"],
+    "APE / NAF":            ["ape", "naf", "code activite"],
+    "TVA intracommunautaire": ["tva intra", "tva", "n tva", "vat", "num tva"],
+    "Adresse":              ["adresse", "adresse 1", "rue", "voie", "address", "adresse facturation", "auto adresse rue"],
+    "Complement d'adresse": ["complement", "adresse 2", "adresse2", "complement adresse"],
+    "Code postal":          ["code postal", "cp", "postal", "zip", "auto code postal"],
+    "Ville":                ["ville", "commune", "city", "localite", "auto ville"],
+    "Pays":                 ["pays", "country"],
+    "Code pays (ISO 2)":    ["iso", "code pays", "country code", "iso2", "auto pays iso2"],
+    "Siret":                ["siret"],
+    "Telephone":            ["telephone", "tel", "phone", "tel fixe", "tel bureau"],
+    "Portable":             ["portable", "mobile", "gsm", "cell"],
+    "Fax":                  ["fax", "telecopie"],
+    "Site web":             ["site", "web", "url", "site web", "website"],
+    "Commentaires":         ["commentaire", "note", "observation", "memo", "comment"],
+    "E-mail":               ["email", "e-mail", "mail", "courriel", "adresse mail"],
+    "Prenom":               ["prenom", "first name", "firstname"],
+    "Nom contact":          ["nom contact", "nom", "last name", "lastname", "nom de famille"],
+}
+
+def _auto_map_columns(src_columns):
+    """Propose un mapping automatique des colonnes source vers les champs Evoliz."""
+    mapping = {}
+
+    for evoliz_field, keywords in _EVOLIZ_FIELD_KEYWORDS.items():
+        best_match = None
+        best_score = 0
+        for src_col in src_columns:
+            sn = norm_piv(str(src_col))
+            if not sn:
+                continue
+            for kw in keywords:
+                kn = norm_piv(kw)
+                if not kn:
+                    continue
+                score = 0
+                if kn == sn:
+                    # Match exact normalise
+                    score = 100
+                elif kn in sn and len(kn) >= len(sn) * 0.6:
+                    # Keyword contenu dans source, mais assez long pour eviter faux positifs
+                    score = 85
+                elif sn in kn and len(sn) >= len(kn) * 0.6:
+                    # Source contenu dans keyword, assez long
+                    score = 80
+                elif kn in sn:
+                    # Keyword court contenu dans source plus longue
+                    score = 50 + len(kn) * 2
+                if score > best_score:
+                    best_score = score
+                    best_match = src_col
+        if best_match and best_score >= 50:
+            mapping[evoliz_field] = best_match
+    return mapping
+
+# --- Onglet Injection Clients ---
+with m_cli:
+    st.subheader("👥 Injection Clients")
+    st.caption("1. Importez un fichier clients  2. Consolidation avec Evoliz  3. Enrichissement Sirene  4. Injection")
+
+    # --- Etape 1 : Upload fichier ---
+    f_meg_cli = st.session_state.get("imp_file_clients")
+    if not f_meg_cli:
+        st.info("Importez d'abord un fichier clients dans l'onglet 📁 Import fichiers.")
+
+    if f_meg_cli:
+        # Lecture du fichier
+        if f_meg_cli.name.lower().endswith(".csv"):
+            f_meg_cli.seek(0)
+            try:
+                df_src = pd.read_csv(f_meg_cli, sep=None, engine="python", header=0)
+            except Exception:
+                f_meg_cli.seek(0)
+                df_src = pd.read_csv(f_meg_cli, sep=";", header=0)
+        else:
+            df_src = _read_meg(f_meg_cli)
+
+        st.caption(f"Fichier lu : **{len(df_src)} lignes**, **{len(df_src.columns)} colonnes**")
+
+        # --- Detection et parsing adresse -> colonnes virtuelles ---
+        # Si une colonne ressemble a une adresse mais qu'il n'y a pas de colonne CP/Ville,
+        # on parse l'adresse pour creer des colonnes synthetiques
+        fwd_test = _auto_map_columns(df_src.columns.tolist())
+        has_adr_col = "Adresse" in fwd_test
+        has_cp_col = "Code postal" in fwd_test
+        has_ville_col = "Ville" in fwd_test
+        has_pays_col = "Pays" in fwd_test or "Code pays (ISO 2)" in fwd_test
+
+        if has_adr_col and (not has_cp_col or not has_ville_col):
+            adr_src_col = fwd_test["Adresse"]
+            parsed_rues, parsed_cps, parsed_villes, parsed_pays = [], [], [], []
+            for _, row in df_src.iterrows():
+                adr = to_clean_str(row.get(adr_src_col, ""))
+                m_adr = re.search(r'^(.*?)\s+(\d{5})\s+(.+)$', adr) if adr else None
+                if m_adr:
+                    parsed_rues.append(m_adr.group(1).strip())
+                    parsed_cps.append(m_adr.group(2))
+                    reste = m_adr.group(3).strip().upper()
+                    ville_p, pays_p = reste, ""
+                    if "FRANCE" in ville_p:
+                        ville_p = ville_p.replace("FRANCE", "").strip()
+                        pays_p = "FR"
+                    else:
+                        for cn, cc in ISO2_MAP.items():
+                            if cn in ville_p:
+                                ville_p = ville_p.replace(cn, "").strip()
+                                pays_p = cc
+                                break
+                    parsed_villes.append(ville_p)
+                    parsed_pays.append(pays_p if pays_p else "FR")
+                else:
+                    parsed_rues.append(adr)
+                    parsed_cps.append("")
+                    parsed_villes.append("")
+                    parsed_pays.append("")
+
+            # Ajouter les colonnes virtuelles au DataFrame
+            added_cols = []
+            if not has_cp_col and any(parsed_cps):
+                df_src["[Auto] Code postal"] = parsed_cps
+                added_cols.append("Code postal")
+            if not has_ville_col and any(parsed_villes):
+                df_src["[Auto] Ville"] = parsed_villes
+                added_cols.append("Ville")
+            if not has_pays_col and any(parsed_pays):
+                df_src["[Auto] Pays ISO2"] = parsed_pays
+                added_cols.append("Pays ISO2")
+            # Remplacer l'adresse originale par la rue seule (in-place)
+            df_src[adr_src_col] = parsed_rues
+            added_cols.append(f"Adresse nettoyee (rue seule dans '{adr_src_col}')")
+
+            if added_cols:
+                st.info(f"🔄 Colonnes generees depuis l'adresse : **{', '.join(added_cols)}**")
+
+        st.dataframe(df_src.head(5), use_container_width=True, hide_index=True)
+
+        # --- Auto-mapping inverse ---
+        all_evoliz_fields = ["— Ignorer",
+            "Societe / Nom", "Code", "Type", "Code postal", "Ville", "Code pays (ISO 2)",
+            "Civilite", "Prenom", "Nom contact",
+            "Forme juridique", "Siren", "Siret", "APE / NAF", "TVA intracommunautaire",
+            "Adresse", "Complement d'adresse", "Pays",
+            "Telephone", "Portable", "Fax", "E-mail", "Site web", "Commentaires"]
+        required_set = {"Societe / Nom", "Code", "Code postal", "Ville", "Code pays (ISO 2)"}
+
+        # Recalculer le mapping si fichier change ou si colonnes ont change (ajout auto)
+        current_cols_sig = ",".join(df_src.columns.tolist())
+        if (st.session_state.get("meg_last_file") != f_meg_cli.name
+                or st.session_state.get("meg_last_cols_sig") != current_cols_sig):
+            # Auto-detect : pour chaque colonne source, quel champ Evoliz ?
+            fwd = _auto_map_columns(df_src.columns.tolist())  # evoliz_field -> src_col
+            rev = {}  # src_col -> evoliz_field
+            for ef, sc in fwd.items():
+                if sc not in rev:  # premiere correspondance gagne
+                    rev[sc] = ef
+            st.session_state["meg_col_mapping_rev"] = rev
+            st.session_state["meg_last_file"] = f_meg_cli.name
+            st.session_state["meg_last_cols_sig"] = current_cols_sig
+
+        rev_map = st.session_state["meg_col_mapping_rev"]
+
+        st.divider()
+        st.subheader("🔗 Mapping des colonnes du fichier")
+        st.caption("Pour chaque colonne de votre fichier, indiquez a quel champ Evoliz elle correspond.")
+
+        # Affichage en 2 colonnes : colonne source | champ Evoliz cible
+        mapping_rev = {}  # src_col -> evoliz_field
+        n_cols = len(df_src.columns)
+        cols_per_row = 2
+        for i in range(0, n_cols, cols_per_row):
+            ui_cols = st.columns(cols_per_row)
+            for j in range(cols_per_row):
+                if i + j >= n_cols:
+                    break
+                src_col = df_src.columns[i + j]
+                default_ev = rev_map.get(src_col, "— Ignorer")
+                idx = all_evoliz_fields.index(default_ev) if default_ev in all_evoliz_fields else 0
+                with ui_cols[j]:
+                    chosen = st.selectbox(
+                        f"📄 **{src_col}**",
+                        all_evoliz_fields,
+                        index=idx,
+                        key=f"rmap_{i+j}",
+                    )
+                    mapping_rev[src_col] = chosen
+
+        # Inverser : evoliz_field -> src_col
+        mapping = {}
+        for sc, ef in mapping_rev.items():
+            if ef != "— Ignorer" and ef not in mapping:
+                mapping[ef] = sc
+
+        # --- Controle des champs obligatoires ---
+        st.divider()
+        st.subheader("📋 Controle des champs obligatoires")
+
+        required_fields_ordered = ["Societe / Nom", "Code", "Code postal", "Ville", "Code pays (ISO 2)"]
+        ctrl_rows = []
+        for ef in required_fields_ordered:
+            served = ef in mapping
+            # Determiner la source si auto-genere
+            if served:
+                statut = "✅ Mappe"
+                source = mapping[ef]
+            elif ef == "Code":
+                statut = "🔄 Auto-genere"
+                source = "Genere depuis le nom"
+            elif ef == "Code pays (ISO 2)":
+                statut = "🔄 Auto-genere"
+                source = "FR par defaut"
+            else:
+                statut = "❌ Manquant"
+                source = "Completable via Sirene"
+            ctrl_rows.append({
+                "Champ obligatoire": f"🔴 {ef}",
+                "Statut": statut,
+                "Source": source,
+            })
+        df_ctrl = pd.DataFrame(ctrl_rows)
+
+        def _color_ctrl(row):
+            s = row["Statut"]
+            if "Mappe" in s: return ["background-color: #d4edda"] * len(row)
+            if "Auto" in s: return ["background-color: #e8f4fd"] * len(row)
+            if "Manquant" in s: return ["background-color: #f8d7da"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(df_ctrl.style.apply(_color_ctrl, axis=1), use_container_width=True, hide_index=True)
+
+        real_missing = [ef for ef in required_fields_ordered
+                        if ef not in mapping and ef not in ("Code", "Code pays (ISO 2)")]
+        if real_missing:
+            st.warning(f"Champs manquants : **{', '.join(real_missing)}** — completables via l'enrichissement Sirene.")
+        else:
+            st.success("Tous les champs obligatoires sont couverts.")
+
+
+        st.session_state["meg_col_mapping_final"] = mapping
+
+    # --- Etape 2 : Consolidation fichier + Evoliz ---
+    has_api = bool(st.session_state.get("token_headers_105"))
+    if f_meg_cli and has_api:
+        # Auto-consolidation si nouveau fichier ou bouton manuel
+        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size)
+        _already_consolidated = st.session_state.get("meg_consol_file_id") == _cli_file_id
+        _auto_run = f_meg_cli and not _already_consolidated
+        _manual_run = st.button("🔄 Re-consolider avec Evoliz", use_container_width=True, key="btn_consolider")
+        if _auto_run or _manual_run:
+            st.session_state["meg_consol_file_id"] = _cli_file_id
+            with st.spinner("Consolidation en cours..."):
+                mapping = st.session_state.get("meg_col_mapping_final", {})
+                headers = st.session_state.token_headers_105
+                cid = st.session_state.company_id_105
+                if not cid:
+                    try:
+                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=headers, timeout=15)
+                        if r_co.status_code == 200:
+                            cos = r_co.json().get("data", [])
+                            if cos: cid = cos[0].get("companyid") or cos[0].get("id"); st.session_state.company_id_105 = cid
+                    except Exception: pass
+
+                def _get(row, field):
+                    col = mapping.get(field)
+                    if not col or col == "— Ignorer" or col not in df_src.columns: return ""
+                    return to_clean_str(row.get(col, ""))
+
+                # Lire les clients Evoliz
+                ev_clients = []; ev_by_name = {}; ev_by_siren = {}
+                url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/clients" if cid else "https://www.evoliz.io/api/v1/clients"
+                page = 1
+                while True:
+                    r = requests.get(url_cli, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
+                    if r.status_code != 200: break
+                    d = r.json()
+                    for it in d.get("data", []):
+                        adr = it.get("address") or {}
+                        entry = {
+                            "clientid": it.get("clientid"), "code": (it.get("code") or "").strip(),
+                            "name": (it.get("name") or "").strip(), "type": (it.get("type") or ""),
+                            "vat_number": (it.get("vat_number") or ""), "business_number": (it.get("business_number") or ""),
+                            "business_identification_number": (it.get("business_identification_number") or ""),
+                            "legalform": (it.get("legal_status") or {}).get("label", "") if isinstance(it.get("legal_status"), dict) else "",
+                            "activity_number": (it.get("activity_number") or ""),
+                            "phone": (it.get("phone") or ""), "mobile": (it.get("mobile") or ""),
+                            "fax": (it.get("fax") or ""), "website": (it.get("website") or ""),
+                            "addr": (adr.get("addr") or ""), "postcode": (adr.get("postcode") or ""),
+                            "town": (adr.get("town") or ""), "iso2": (adr.get("iso2") or ""),
+                        }
+                        ev_clients.append(entry)
+                        n = norm_piv(entry["name"])
+                        if n: ev_by_name[n] = entry
+                        s = entry["business_identification_number"].strip()
+                        if s and s != "N/C": ev_by_siren[s] = entry
+                    if page >= d.get("meta", {}).get("last_page", 1): break
+                    page += 1
+
+                # Construire la liste consolidee
+                ci = {h.split(" *")[0]: i for i, h in enumerate(H_CLIENT)}
+                consol_rows = []; seen_ev_ids = set()
+
+                for _, row in df_src.iterrows():
+                    nom = _get(row, "Societe / Nom")
+                    prenom = _get(row, "Prenom"); nom_contact = _get(row, "Nom contact")
+                    if not nom and (prenom or nom_contact): nom = f"{prenom} {nom_contact}".strip()
+                    if not nom: continue
+                    _raw_code = _get(row, "Code")
+                    # Si le code est un UUID ou trop long, generer depuis le nom
+                    if _raw_code and len(_raw_code) <= 20 and "-" not in _raw_code:
+                        code = _raw_code
+                    else:
+                        code = norm_piv(nom)[:15]
+                    type_c = _normalize_type(_get(row, "Type"), nom)
+                    cp = _get(row, "Code postal"); ville = _get(row, "Ville")
+                    pays = _get(row, "Pays"); iso2 = _get(row, "Code pays (ISO 2)")
+                    adresse = _get(row, "Adresse")
+                    if adresse and (not cp or not ville):
+                        m_adr = re.search(r'^(.*?)\s+(\d{5})\s+(.+)$', adresse)
+                        if m_adr:
+                            adresse = m_adr.group(1).strip()
+                            if not cp: cp = m_adr.group(2)
+                            if not ville:
+                                v = m_adr.group(3).strip().upper()
+                                if "FRANCE" in v: v = v.replace("FRANCE","").strip(); iso2 = iso2 or "FR"
+                                ville = v
+                    if iso2: iso2 = iso2.upper()
+                    elif pays: iso2 = _lookup_iso2(pays)
+                    else: iso2 = "FR"
+
+                    entry = {
+                        "Code": code, "Societe / Nom": nom, "Type": type_c,
+                        "Siren": _get(row, "Siren"), "Siret": _get(row, "Siret"),
+                        "TVA intracommunautaire": _get(row, "TVA intracommunautaire") or ("NC" if type_c != "Particulier" else ""),
+                        "Forme juridique": _normalize_forme_juridique(_get(row, "Forme juridique")),
+                        "APE / NAF": _get(row, "APE / NAF"),
+                        "Adresse": adresse, "Complement d'adresse": _get(row, "Complement d'adresse"),
+                        "Code postal": cp or "NC", "Ville": ville or "NC", "Code pays (ISO 2)": iso2,
+                        "Telephone": _get(row, "Telephone"), "Portable": _get(row, "Portable"),
+                        "Fax": _get(row, "Fax"), "Site web": _get(row, "Site web"),
+                        "Commentaires": _get(row, "Commentaires"),
+                    }
+                    siren_val = entry["Siren"]
+                    ev = ev_by_name.get(norm_piv(nom))
+                    if not ev and siren_val: ev = ev_by_siren.get(siren_val)
+                    if ev:
+                        seen_ev_ids.add(ev["clientid"])
+                        entry["_source"] = "📄+☁️ Doublon"
+                        entry["_clientid"] = ev["clientid"]
+                    else:
+                        entry["_source"] = "📄 Nouveau"
+                        entry["_clientid"] = None
+                    consol_rows.append(entry)
+
+                for ev in ev_clients:
+                    if ev["clientid"] not in seen_ev_ids:
+                        consol_rows.append({
+                            "Code": ev["code"], "Societe / Nom": ev["name"], "Type": ev["type"],
+                            "Siren": ev["business_identification_number"], "Siret": ev["business_number"],
+                            "TVA intracommunautaire": ev["vat_number"], "Forme juridique": ev["legalform"],
+                            "APE / NAF": ev["activity_number"],
+                            "Adresse": ev["addr"], "Complement d'adresse": "",
+                            "Code postal": ev["postcode"], "Ville": ev["town"], "Code pays (ISO 2)": ev["iso2"],
+                            "Telephone": ev["phone"], "Portable": ev["mobile"],
+                            "Fax": ev["fax"], "Site web": ev["website"], "Commentaires": "",
+                            "_source": "☁️ Evoliz seul", "_clientid": ev["clientid"],
+                        })
+
+                wb_c, ws_c = _make_wb(H_CLIENT)
+                for cr in consol_rows:
+                    ro = [None] * len(H_CLIENT)
+                    for field, idx_c in ci.items():
+                        if field in cr: ro[idx_c] = cr[field]
+                    ws_c.append(ro)
+                cb = _wb_bytes(wb_c)
+                with open(GABARIT_CLIENT_PATH, "wb") as f: f.write(cb)
+                df_preview_c = pd.read_excel(io.BytesIO(cb), header=0)
+
+                st.session_state["meg_df_clients"] = df_preview_c
+                st.session_state["meg_df_clients_original"] = df_preview_c.copy()
+                st.session_state["meg_consol_sources"] = {i: cr["_source"] for i, cr in enumerate(consol_rows)}
+                st.session_state["meg_consol_ev_ids"] = {i: cr["_clientid"] for i, cr in enumerate(consol_rows)}
+                st.session_state["meg_consol_stats"] = {
+                    "fichier": sum(1 for cr in consol_rows if "Nouveau" in cr["_source"]),
+                    "doublons": sum(1 for cr in consol_rows if "Doublon" in cr["_source"]),
+                    "evoliz_seul": sum(1 for cr in consol_rows if "Evoliz seul" in cr["_source"]),
+                    "total_evoliz": len(ev_clients),
+                }
+                for _k in ["meg_sirene_cells","meg_sirene_info","meg_sirene_log","meg_sirene_stats","meg_enrichir_flags","meg_sirene_suggestions"]:
+                    st.session_state[_k] = set() if "cells" in _k else ({} if "info" in _k or "flags" in _k else ([] if "log" in _k else None))
+                st.rerun()
+    elif f_meg_cli and not has_api:
+        st.warning("Connectez-vous a l'API Evoliz (onglet Balance & Cles API) pour consolider.")
+
+    # --- Init session ---
+    for _k, _d in [("meg_sirene_cells", set()), ("meg_sirene_log", []), ("meg_sirene_stats", None),
+                    ("meg_sirene_info", {}), ("meg_editor_ver", 0), ("meg_consol_sources", {}), ("meg_consol_stats", None)]:
+        if _k not in st.session_state: st.session_state[_k] = _d
+
+    # --- Affichage consolide ---
+    if "meg_df_clients" in st.session_state and st.session_state["meg_df_clients"] is not None:
+        df_preview_c = st.session_state["meg_df_clients"]
+        sirene_cells = st.session_state.get("meg_sirene_cells", set())
+        sirene_info = st.session_state.get("meg_sirene_info", {})
+        sources = st.session_state.get("meg_consol_sources", {})
+        consol_stats = st.session_state.get("meg_consol_stats")
+        enrichir_flags = st.session_state.get("meg_enrichir_flags", {})
+
+        if consol_stats:
+            st.divider()
+            st.subheader("📊 Consolidation")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("📄 Nouveaux", consol_stats.get("fichier",0))
+            c2.metric("📄+☁️ Doublons", consol_stats.get("doublons",0))
+            c3.metric("☁️ Evoliz seul", consol_stats.get("evoliz_seul",0))
+            c4.metric("Total", len(df_preview_c))
+
+        cols_show = ["Code *","Societe / Nom *","Type *","Siren","Adresse","Code postal *","Ville *",
+                     "Code pays (ISO 2) *","Telephone","TVA intracommunautaire","Forme juridique","APE / NAF","Siret"]
+        cols_show = [c for c in cols_show if c in df_preview_c.columns]
+        df_show = df_preview_c[cols_show].copy()
+        df_show.insert(0, "Source", df_show.index.map(lambda i: sources.get(i, "")))
+
+        has_enriched = sirene_cells and any(any((i, c) in sirene_cells for c in cols_show) for i in sirene_info)
+        if has_enriched:
+            for idx in df_show.index:
+                for col in cols_show:
+                    if (idx, col) in sirene_cells:
+                        val = df_show.at[idx, col]
+                        if val is not None and str(val).strip() and not str(val).startswith("🟢"):
+                            df_show.at[idx, col] = f"🟢 {val}"
+            df_show.insert(1, "✅", df_show.index.map(
+                lambda i: enrichir_flags.get(i, True) if i in sirene_info and any((i, c) in sirene_cells for c in cols_show) else None))
+            df_show.insert(2, "🟢 Nom trouve", df_show.index.map(lambda i: f"🟢 {v}" if (v := sirene_info.get(i, {}).get("nom", "")) else ""))
+            df_show.insert(3, "🟢 APE trouve", df_show.index.map(lambda i: f"🟢 {v}" if (v := sirene_info.get(i, {}).get("activite", "")) else ""))
+
+        st.subheader(f"👥 {len(df_preview_c)} client(s) consolides")
+
+        if has_enriched:
+            st.caption("🟢 = enrichi Sirene. Decochez ✅ pour garder les donnees d'origine.")
+            edited = st.data_editor(df_show, use_container_width=True, hide_index=True,
+                disabled=[c for c in df_show.columns if c != "✅"],
+                column_config={"✅": st.column_config.CheckboxColumn("✅", default=True, width="small")},
+                key=f"meg_enrichir_editor_{st.session_state.get('meg_editor_ver', 0)}")
+            if "✅" in edited.columns:
+                for i in edited.index:
+                    v = edited.at[i, "✅"]
+                    if v is not None: enrichir_flags[i] = bool(v)
+                st.session_state["meg_enrichir_flags"] = enrichir_flags
+        else:
+            def _color_source(row):
+                src = str(row.get("Source", ""))
+                if "Nouveau" in src: return ["background-color: #d4edda"] * len(row)
+                if "Doublon" in src: return ["background-color: #fff3cd"] * len(row)
+                if "Evoliz seul" in src: return ["background-color: #e8f4fd"] * len(row)
+                return [""] * len(row)
+            st.dataframe(df_show.style.apply(_color_source, axis=1), use_container_width=True, hide_index=True)
+            st.caption("🟢 Vert = Nouveau | 🟡 Jaune = Doublon | 🔵 Bleu = Evoliz seul")
+
+        # --- CR enrichissement ---
+        if st.session_state.get("meg_sirene_stats"):
+            stats = st.session_state["meg_sirene_stats"]
+            with st.expander("📋 CR enrichissement Sirene", expanded=False):
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("✅ Enrichis", stats["enriched"]); c2.metric("🟰 Complets", stats["already_complete"])
+                c3.metric("🔍 Non trouves", stats["not_found"]); c4.metric("⏭️ Ignores", stats["skipped"])
+                lr = st.session_state.get("meg_sirene_log", [])
+                if lr:
+                    df_log = pd.DataFrame(lr)
+                    def _cl(row):
+                        s = row.get("Statut","")
+                        if "Enrichi" in s: return ["background-color:#d4edda"]*len(row)
+                        if "Non trouve" in s: return ["background-color:#fff3cd"]*len(row)
+                        if "Erreur" in s or "HTTP" in s: return ["background-color:#f8d7da"]*len(row)
+                        return [""]*len(row)
+                    st.dataframe(df_log.style.apply(_cl, axis=1), use_container_width=True, hide_index=True)
+
+        # --- Enrichissement SIRENE ---
+        st.divider()
+        enrich_all = st.checkbox("Inclure aussi les Particuliers", value=False, key="sirene_all")
+        if st.button("🔍 Enrichir via Sirene", use_container_width=True, key="btn_sirene"):
+            st.session_state["meg_enrichir_flags"] = {}
+            df_e = df_preview_c.copy()
+            enriched = skipped = already_complete = not_found_count = 0
+            log_rows = []; new_sc = set(sirene_cells); new_si = dict(sirene_info)
+            progress = st.progress(0, text="Recherche Sirene...")
+            for idx in df_e.index:
+                nom = str(df_e.at[idx, "Societe / Nom *"]).strip() if "Societe / Nom *" in df_e.columns else ""
+                type_c = str(df_e.at[idx, "Type *"]).strip() if "Type *" in df_e.columns else ""
+                code = str(df_e.at[idx, "Code *"]).strip() if "Code *" in df_e.columns else ""
+                if not nom: skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Vide","Trouve":"","Detail":""}); progress.progress((idx+1)/len(df_e)); continue
+                if type_c == "Particulier" and not enrich_all: skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Part.","Trouve":"","Detail":""}); progress.progress((idx+1)/len(df_e)); continue
+                progress.progress((idx+1)/len(df_e), text=f"{idx+1}/{len(df_e)} — {nom[:40]}")
+                try:
+                    sq = " ".join(nom.replace("nan","").split()).strip()
+                    if not sq: skipped += 1; continue
+                    r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params={"q":sq,"per_page":5,"page":1}, timeout=10)
+                    if r.status_code == 429: time.sleep(2); r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params={"q":sq,"per_page":5,"page":1}, timeout=10)
+                    if r.status_code != 200: log_rows.append({"Client":code,"Nom":nom,"Statut":f"❌ HTTP {r.status_code}","Trouve":"","Detail":sq}); time.sleep(0.15); continue
+                    results = r.json().get("results", [])
+                    if not results: not_found_count += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouve","Trouve":"","Detail":sq}); time.sleep(0.15); continue
+                    # Verifier si le 1er resultat correspond bien (nom normalise similaire)
+                    best = results[0]
+                    best_name = best.get("nom_complet", best.get("nom_raison_sociale",""))
+                    nom_n = norm_piv(nom); best_n = norm_piv(best_name)
+                    # Match si le nom normalise est contenu ou > 60% de similarite
+                    auto_match = (nom_n == best_n or nom_n in best_n or best_n in nom_n
+                                  or (len(nom_n) > 3 and len(best_n) > 3 and
+                                      len(set(nom_n) & set(best_n)) / max(len(set(nom_n)), len(set(best_n))) > 0.6))
+                    if not auto_match:
+                        # Pas de match auto : stocker les suggestions
+                        suggestions = []
+                        for res in results[:5]:
+                            rn = res.get("nom_complet", res.get("nom_raison_sociale",""))
+                            rs = res.get("siren","")
+                            rsie = (res.get("siege") or {})
+                            rv = rsie.get("libelle_commune","")
+                            ra = rsie.get("activite_principale","")
+                            suggestions.append({"nom": rn, "siren": rs, "ville": rv, "activite": _naf_label(ra), "_raw": res})
+                        if "meg_sirene_suggestions" not in st.session_state:
+                            st.session_state["meg_sirene_suggestions"] = {}
+                        st.session_state["meg_sirene_suggestions"][idx] = {"client": nom, "code": code, "search": sq, "suggestions": suggestions}
+                        not_found_count += 1
+                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔎 Suggestions","Trouve":f"{len(suggestions)} proposition(s)","Detail":"; ".join(s['nom'] for s in suggestions[:3])})
+                        time.sleep(0.15); continue
+                    ent = best; siege = ent.get("siege",{}); siren = ent.get("siren",""); siret = siege.get("siret","")
+                    nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale",""))
+                    new_si[idx] = {"nom": nom_t or "", "activite": _naf_label(siege.get("activite_principale", ent.get("activite_principale",""))), "ville": siege.get("libelle_commune","")}
+                    champs = []
+                    def _sc(col, val, lbl):
+                        if col in df_e.columns and val and (not to_clean_str(df_e.at[idx,col]) or to_clean_str(df_e.at[idx,col])=="NC"):
+                            df_e.at[idx,col]=val; new_sc.add((idx,col)); champs.append(f"{lbl}={val}")
+                    _sc("Siren",siren,"SIREN"); _sc("Siret",siret,"SIRET")
+                    # Si on a un SIREN, c'est forcement un professionnel
+                    if siren and "Type *" in df_e.columns and df_e.at[idx, "Type *"] != "Professionnel":
+                        df_e.at[idx, "Type *"] = "Professionnel"; new_sc.add((idx, "Type *")); champs.append("Type=Professionnel")
+                    _sc("APE / NAF",ent.get("activite_principale",""),"NAF")
+                    _sc("Forme juridique",_normalize_forme_juridique(ent.get("nature_juridique","")),"Forme")
+                    if siren and "TVA intracommunautaire" in df_e.columns:
+                        cur = to_clean_str(df_e.at[idx,"TVA intracommunautaire"])
+                        if not cur or cur=="NC":
+                            tv = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"; df_e.at[idx,"TVA intracommunautaire"]=tv; new_sc.add((idx,"TVA intracommunautaire")); champs.append(f"TVA={tv}")
+                    if not to_clean_str(df_e.at[idx,"Adresse"]) if "Adresse" in df_e.columns else True:
+                        pts = [siege.get("numero_voie",""),siege.get("type_voie",""),siege.get("libelle_voie","")]
+                        a = " ".join(p for p in pts if p)
+                        if a and "Adresse" in df_e.columns: df_e.at[idx,"Adresse"]=a; new_sc.add((idx,"Adresse")); champs.append(f"Adr={a[:25]}")
+                    _sc("Code postal *",siege.get("code_postal",""),"CP"); _sc("Ville *",siege.get("libelle_commune",""),"Ville")
+                    if champs: enriched += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"✅ Enrichi","Trouve":nom_t,"Detail":", ".join(champs)})
+                    else: already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":nom_t,"Detail":""})
+                    time.sleep(0.15)
+                except Exception as exc: log_rows.append({"Client":code,"Nom":nom,"Statut":"❌ Erreur","Trouve":"","Detail":str(exc)[:60]})
+            progress.empty()
+            st.session_state["meg_df_clients"] = df_e; st.session_state["meg_sirene_cells"] = new_sc; st.session_state["meg_sirene_info"] = new_si
+            st.session_state["meg_sirene_log"] = log_rows; st.session_state["meg_sirene_stats"] = {"enriched":enriched,"already_complete":already_complete,"not_found":not_found_count,"skipped":skipped}
+            wb_n, ws_n = _make_wb(H_CLIENT)
+            for _, rw in df_e.iterrows(): ws_n.append([rw.iloc[i] if not pd.isna(rw.iloc[i]) else None for i in range(len(rw))])
+            with open(GABARIT_CLIENT_PATH,"wb") as f: f.write(_wb_bytes(wb_n))
+            st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver",0)+1
+            st.rerun()
+
+        # --- Suggestions Sirene (clients non trouves automatiquement) ---
+        suggestions = st.session_state.get("meg_sirene_suggestions", {})
+        if suggestions:
+            st.divider()
+            st.subheader(f"🔎 {len(suggestions)} client(s) a confirmer manuellement")
+            st.caption("Pour chaque client non identifie automatiquement, selectionnez la bonne entreprise ou ignorez.")
+
+            applied = 0
+            for idx, sug_data in sorted(suggestions.items()):
+                client_nom = sug_data["client"]
+                client_code = sug_data["code"]
+                sugs = sug_data["suggestions"]
+                options = ["— Ignorer"] + [f"{s['nom']} | SIREN {s['siren']} | {s['ville']} | {s['activite']}" for s in sugs]
+                chosen = st.selectbox(f"**{client_nom}** (code: {client_code})", options, key=f"sug_{idx}")
+
+                if chosen != "— Ignorer":
+                    chosen_idx = options.index(chosen) - 1
+                    if st.button(f"✅ Appliquer pour {client_nom}", key=f"sug_apply_{idx}"):
+                        # Appliquer l'enrichissement du choix
+                        ent = sugs[chosen_idx]["_raw"]
+                        siege = ent.get("siege", {})
+                        siren = ent.get("siren", ""); siret = siege.get("siret", "")
+                        nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale", ""))
+
+                        sirene_info[idx] = {"nom": nom_t, "activite": _naf_label(siege.get("activite_principale", ent.get("activite_principale", ""))), "ville": siege.get("libelle_commune", "")}
+                        sirene_cells_tmp = set(sirene_cells)
+
+                        def _apply(col, val):
+                            if col in df_preview_c.columns and val:
+                                cur = to_clean_str(df_preview_c.at[idx, col])
+                                if not cur or cur == "NC":
+                                    df_preview_c.at[idx, col] = val
+                                    sirene_cells_tmp.add((idx, col))
+                        _apply("Siren", siren); _apply("Siret", siret)
+                        if siren and "Type *" in df_preview_c.columns and df_preview_c.at[idx, "Type *"] != "Professionnel":
+                            df_preview_c.at[idx, "Type *"] = "Professionnel"; sirene_cells_tmp.add((idx, "Type *"))
+                        _apply("APE / NAF", ent.get("activite_principale", ""))
+                        _apply("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
+                        if siren and "TVA intracommunautaire" in df_preview_c.columns:
+                            cur = to_clean_str(df_preview_c.at[idx, "TVA intracommunautaire"])
+                            if not cur or cur == "NC":
+                                tv = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"
+                                df_preview_c.at[idx, "TVA intracommunautaire"] = tv
+                                sirene_cells_tmp.add((idx, "TVA intracommunautaire"))
+                        if not to_clean_str(df_preview_c.at[idx, "Adresse"]) if "Adresse" in df_preview_c.columns else True:
+                            pts = [siege.get("numero_voie",""), siege.get("type_voie",""), siege.get("libelle_voie","")]
+                            a = " ".join(p for p in pts if p)
+                            if a and "Adresse" in df_preview_c.columns:
+                                df_preview_c.at[idx, "Adresse"] = a; sirene_cells_tmp.add((idx, "Adresse"))
+                        _apply("Code postal *", siege.get("code_postal", ""))
+                        _apply("Ville *", siege.get("libelle_commune", ""))
+
+                        st.session_state["meg_df_clients"] = df_preview_c
+                        st.session_state["meg_sirene_cells"] = sirene_cells_tmp
+                        st.session_state["meg_sirene_info"] = sirene_info
+                        # Retirer des suggestions
+                        del st.session_state["meg_sirene_suggestions"][idx]
+                        # Regenerer le workbook
+                        wb_n, ws_n = _make_wb(H_CLIENT)
+                        for _, rw in df_preview_c.iterrows():
+                            ws_n.append([rw.iloc[i] if not pd.isna(rw.iloc[i]) else None for i in range(len(rw))])
+                        with open(GABARIT_CLIENT_PATH, "wb") as f: f.write(_wb_bytes(wb_n))
+                        st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                        applied += 1
+                        st.rerun()
+
+        # --- Etape 4 : Injection ---
+        sirene_cells_per_row = {r for (r,_) in sirene_cells}
+        st.divider()
+        st.subheader("🚀 Injection dans Evoliz")
+        inject_btn = st.button("🚀 Injecter les clients", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api)
+        if inject_btn and has_api:
+            headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
+            url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/clients" if cid else "https://www.evoliz.io/api/v1/clients"
+            ev_ids = st.session_state.get("meg_consol_ev_ids", {})
+            df_final = df_preview_c.copy(); df_orig = st.session_state.get("meg_df_clients_original")
+            for idx in df_final.index:
+                if df_orig is not None and idx in sirene_cells_per_row and not enrichir_flags.get(idx, True):
+                    if idx < len(df_orig): df_final.iloc[idx] = df_orig.iloc[idx]
+            ci_h = {h.split(" *")[0]: i for i, h in enumerate(H_CLIENT)}
+            created=updated=up_to_date=skipped_inj=0; errors=[]; inject_log=[]
+            progress = st.progress(0, text="Injection...")
+            for idx, row in df_final.iterrows():
+                nom = to_clean_str(row.iloc[ci_h["Societe / Nom"]]) if ci_h.get("Societe / Nom") is not None else ""
+                if not nom: skipped_inj += 1; continue
+                code = to_clean_str(row.iloc[ci_h["Code"]]) if ci_h.get("Code") is not None else ""
+                type_c = to_clean_str(row.iloc[ci_h["Type"]]) if ci_h.get("Type") is not None else "Professionnel"
+                cp = to_clean_str(row.iloc[ci_h["Code postal"]]) if ci_h.get("Code postal") is not None else ""
+                ville = to_clean_str(row.iloc[ci_h["Ville"]]) if ci_h.get("Ville") is not None else ""
+                _iso2_raw = to_clean_str(row.iloc[ci_h["Code pays (ISO 2)"]]) if ci_h.get("Code pays (ISO 2)") is not None else ""
+                iso2v = _iso2_raw.upper()[:2] if _iso2_raw and len(_iso2_raw) >= 2 and _iso2_raw.isalpha() else "FR"
+                payload = {"name":nom,"type":type_c,"address":{"postcode":cp if cp and cp!="NC" else "00000","town":ville if ville and ville!="NC" else "NC","iso2":iso2v}}
+                if code: payload["code"] = code[:20]
+                tva_v = to_clean_str(row.iloc[ci_h["TVA intracommunautaire"]]) if ci_h.get("TVA intracommunautaire") is not None else ""
+                payload["vat_number"] = tva_v if tva_v and tva_v != "NC" else "N/C"
+                siret_v = to_clean_str(row.iloc[ci_h["Siret"]]) if ci_h.get("Siret") is not None else ""
+                payload["business_number"] = siret_v if siret_v and siret_v != "NC" else "N/C"
+                for fld, ak in [("Forme juridique","legalform"),("Siren","business_identification_number"),("APE / NAF","activity_number"),("Telephone","phone"),("Portable","mobile"),("Fax","fax"),("Site web","website"),("Commentaires","comment")]:
+                    v = to_clean_str(row.iloc[ci_h[fld]]) if ci_h.get(fld) is not None else ""
+                    if v and v != "NC": payload[ak] = v
+                adr = to_clean_str(row.iloc[ci_h["Adresse"]]) if ci_h.get("Adresse") is not None else ""
+                if adr: payload["address"]["addr"] = adr
+                client_id = ev_ids.get(idx)
+                if client_id:
+                    r = requests.patch(f"{url_cli}/{client_id}", headers=headers, json=payload, timeout=15)
+                    if r.status_code in (200,204): updated += 1; inject_log.append({"Code":code,"Nom":nom,"Action":"🔄 MAJ","Statut":"✅ OK","Detail":""})
+                    else: errors.append(f"MAJ '{nom}': HTTP {r.status_code}"); inject_log.append({"Code":code,"Nom":nom,"Action":"🔄 MAJ","Statut":f"❌ {r.status_code}","Detail":r.text[:80]})
+                else:
+                    r = requests.post(url_cli, headers=headers, json=payload, timeout=15)
+                    if r.status_code in (200,201): created += 1; inject_log.append({"Code":code,"Nom":nom,"Action":"➕ Creation","Statut":"✅ OK","Detail":""})
+                    elif r.status_code == 400 and "already been taken" in r.text: updated += 1; inject_log.append({"Code":code,"Nom":nom,"Action":"🔄 Existant","Statut":"✅ OK","Detail":""})
+                    else: errors.append(f"Creation '{nom}': HTTP {r.status_code}"); inject_log.append({"Code":code,"Nom":nom,"Action":"➕ Creation","Statut":f"❌ {r.status_code}","Detail":r.text[:80]})
+                progress.progress((idx+1)/len(df_final), text=f"{idx+1}/{len(df_final)} - {nom[:30]}"); time.sleep(0.15)
+            progress.empty()
+            st.divider(); st.subheader("📊 Synthese")
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("➕ Crees",created); c2.metric("🔄 MAJ",updated); c3.metric("⏭️ Ignores",skipped_inj); c4.metric("❌ Erreurs",len(errors))
+            if created+updated > 0: st.success(f"Injection : {created} cree(s), {updated} mis a jour")
+            elif errors: st.error(f"{len(errors)} erreur(s)")
+            if inject_log:
+                df_il = pd.DataFrame(inject_log)
+                def _ci(row):
+                    a=str(row.get("Action","")); s=str(row.get("Statut",""))
+                    if "OK" in s and "Creation" in a: return ["background-color:#d4edda"]*len(row)
+                    if "OK" in s: return ["background-color:#e8f4fd"]*len(row)
+                    if "❌" in s: return ["background-color:#f8d7da"]*len(row)
+                    return [""]*len(row)
+                st.dataframe(df_il.style.apply(_ci, axis=1), use_container_width=True, hide_index=True)
+
+
+# --- Onglet Bascule Factures ---
+with m_fac:
+    st.subheader("🧾 Bascule Factures, Avoirs & Paiements MEG")
+    f_meg_fac = st.session_state.get("imp_file_factures")
+    f_meg_cli2 = None  # utilise le gabarit genere a l'etape clients
+    if not f_meg_fac:
+        st.info("Importez d'abord un fichier factures dans l'onglet 📁 Import fichiers.")
+    c1, c2 = st.columns(2)
+    meg_tva1 = c1.number_input("TVA 1 (%)", value=20.0, step=0.5, key="meg_tva1")
+    meg_tva2 = c2.number_input("TVA 2 (%)", value=0.0, step=0.5, key="meg_tva2")
+    c3, c4 = st.columns(2)
+    meg_pf = c3.text_input("Prefixe Facture", value="FAC", key="meg_pf")
+    meg_pa = c4.text_input("Prefixe Avoir", value="AVR", key="meg_pa")
+    if f_meg_fac and st.button("Generer Gabarit Facture, Avoir & Paiement", key="btn_meg_fac"):
+        df_cli = None
+        if f_meg_cli2: df_cli = _read_meg(f_meg_cli2)
+        elif os.path.exists(GABARIT_CLIENT_PATH): df_cli = pd.read_excel(GABARIT_CLIENT_PATH, header=0)
+        if df_cli is None:
+            st.error("Generez d'abord le Gabarit Client ou uploadez-le.")
+        else:
+            with st.spinner("Traitement en cours..."):
+                df_f = _read_meg(f_meg_fac)
+                st.dataframe(df_f.head(10), use_container_width=True)
+                cl_lk = {}
+                for _, r in df_cli.iterrows():
+                    cd=to_clean_str(r.iloc[0]); nm=to_clean_str(r.iloc[2]) if len(r)>2 else ""; fm=to_clean_str(r.iloc[5]) if len(r)>5 else ""
+                    lk=f"{fm} {nm}".strip()
+                    if lk: cl_lk[lk]=cd
+                    if nm: cl_lk[nm]=cd
+                def _fcc(name):
+                    cn=name.strip()
+                    if cn in cl_lk: return cl_lk[cn]
+                    for k,v in cl_lk.items():
+                        if cn in k or k in cn: return v
+                    return "Client non present"
+                wb_f,ws_f=_make_wb(H_FACTURE); wb_a,ws_a=_make_wb(H_AVOIR); wb_p,ws_p=_make_wb(H_PAIEMENT)
+                has_av=has_pa=tva_err=False
+                fi={h.split(" *")[0]:i for i,h in enumerate(H_FACTURE)}
+                ai={h.split(" *")[0]:i for i,h in enumerate(H_AVOIR)}
+                pi={h.split(" *")[0]:i for i,h in enumerate(H_PAIEMENT)}
+                ta=[meg_tva1,meg_tva2]
+                def _gr(rate):
+                    for t in ta:
+                        if abs(rate-t)<=0.1: return t
+                    return rate
+                def _af(r,ht,tv=0):
+                    o=[None]*len(H_FACTURE); o[fi["N facture externe"]]=to_clean_str(r.iloc[1]); o[fi["Date facture"]]=_parse_date(r.iloc[2])
+                    cn=to_clean_str(r.iloc[3]); o[fi["Client"]]=cn; o[fi["Code client"]]=_fcc(cn)
+                    o[fi["Commentaires"]]=to_clean_str(r.iloc[4]); o[fi["Conditions de reglement"]]="A reception"
+                    o[fi["Designation"]]="NC"; o[fi["Qte"]]=1; o[fi["PU HT"]]=round(float(ht),2); o[fi["TVA"]]=tv
+                    ws_f.append(o); return ws_f.max_row
+                def _aa(r,ht,tv=0):
+                    has_av=True
+                    o=[None]*len(H_AVOIR); o[ai["N avoir externe"]]=to_clean_str(r.iloc[1]); o[ai["Date avoir"]]=_parse_date(r.iloc[2])
+                    cn=to_clean_str(r.iloc[3]); o[ai["Client"]]=cn; o[ai["Code client"]]=_fcc(cn)
+                    o[ai["Commentaires"]]=to_clean_str(r.iloc[4]); o[ai["Conditions de reglement"]]="A reception"
+                    o[ai["Designation"]]="NC"; o[ai["Qte"]]=1; o[ai["PU HT"]]=round(float(ht),2); o[ai["TVA"]]=tv
+                    ws_a.append(o); return ws_a.max_row
+                def _ap(r,paid):
+                    has_pa=True
+                    o=[None]*len(H_PAIEMENT); o[pi["Facture n"]]=to_clean_str(r.iloc[1]); o[pi["Date paiement"]]=_parse_date(r.iloc[2])
+                    o[pi["Libelle"]]="Reglement client"; o[pi["Mode de paiement"]]="Autres"; o[pi["Montant"]]=round(float(paid),2)
+                    ws_p.append(o)
+                for _,row in df_f.iterrows():
+                    ht=_safe_float(row.iloc[5]); ttc=_safe_float(row.iloc[6]); paid=_safe_float(row.iloc[7])
+                    doc=to_clean_str(row.iloc[1]); stat=to_clean_str(row.iloc[0])
+                    if ht==0: continue
+                    is_f=doc.startswith(meg_pf); is_a=doc.startswith(meg_pa)
+                    if ttc-ht==0:
+                        if is_f: _af(row,ht)
+                        if is_a: _aa(row,ht)
+                    else:
+                        tva_am=ttc-ht; tva_r=round(tva_am/ht*100,2); tva_r=_gr(tva_r)
+                        if tva_r==meg_tva1 or tva_r==meg_tva2:
+                            if is_f: _af(row,ht,tva_r)
+                            if is_a: _aa(row,ht,tva_r)
+                        else:
+                            if meg_tva2/100-meg_tva1/100!=0: ht2=round((ttc-ht*(1+meg_tva1/100))/(meg_tva2/100-meg_tva1/100),2)
+                            else: ht2=0
+                            ht1=ht-ht2; tc=round(ht1*meg_tva1/100+ht2*meg_tva2/100,2)
+                            for hv,tv in [(ht1,meg_tva1),(ht2,meg_tva2)]:
+                                if is_f:
+                                    lr=_af(row,hv,tv)
+                                    if tva_am!=tc: ws_f.cell(row=lr,column=fi["TVA"]+1).value="TVA a verifier"; tva_err=True
+                                if is_a:
+                                    lr=_aa(row,hv,tv)
+                                    if tva_am!=tc: ws_a.cell(row=lr,column=ai["TVA"]+1).value="TVA a verifier"; tva_err=True
+                    ttc9=_safe_float(row.iloc[8]) if len(row)>8 else ttc
+                    if is_f and stat!="Annulee" and ttc9!=ttc and paid!=0: _ap(row,paid)
+                if tva_err: st.warning("Des erreurs de TVA detectees. Verifiez la colonne TVA.")
+                zb = io.BytesIO()
+                with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr("3. Gabarit Facture.xlsx",_wb_bytes(wb_f))
+                    if has_pa: zf.writestr("4. Gabarit Paiement.xlsx",_wb_bytes(wb_p))
+                    if has_av: zf.writestr("5. Gabarit Avoir.xlsx",_wb_bytes(wb_a))
+                zb.seek(0)
+                st.success("Gabarits generes")
+                st.download_button("Telecharger le ZIP",data=zb.getvalue(),file_name="Gabarit_Facture_Paiement_Avoir.zip",mime="application/zip",key="dl_meg_fac")
+
+# --- Onglet Bascule Articles ---
+with m_art:
+    st.subheader("📦 Bascule Articles MEG")
+    art_mode = st.radio("Mode", ["Gabarit Excel","Envoi direct API Evoliz"], horizontal=True, key="art_mode")
+    f_meg_art = st.session_state.get("imp_file_articles")
+    if not f_meg_art:
+        st.info("Importez d'abord un fichier articles dans l'onglet 📁 Import fichiers.")
+    if art_mode == "Gabarit Excel":
+        if f_meg_art and st.button("Generer Gabarit Article", key="btn_meg_art"):
+            with st.spinner("Traitement..."):
+                df=_read_meg(f_meg_art); st.dataframe(df.head(10),use_container_width=True)
+                wb_ar,ws_ar=_make_wb(H_ARTICLE); ari={h.split(" *")[0]:i for i,h in enumerate(H_ARTICLE)}
+                for _,row in df.iterrows():
+                    r=[None]*len(H_ARTICLE); r[ari["Reference"]]=to_clean_str(row.iloc[0]); r[ari["Designation"]]=to_clean_str(row.iloc[1])
+                    r[ari["Code Classification vente"]]=to_clean_str(row.iloc[4]) if len(row)>4 else ""
+                    r[ari["PU HT"]]=row.iloc[6] if len(row)>6 else ""; r[ari["TVA"]]=row.iloc[7] if len(row)>7 else ""
+                    ws_ar.append(r)
+                zb=io.BytesIO()
+                with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf: zf.writestr("Gabarit Article.xlsx",_wb_bytes(wb_ar))
+                zb.seek(0); st.success("Gabarit Article genere")
+                st.download_button("Telecharger le ZIP",data=zb.getvalue(),file_name="Gabarit_Article.zip",mime="application/zip",key="dl_meg_art")
+    else:
+        has_h = bool(st.session_state.token_headers_105)
+        if not has_h: st.warning("Connectez-vous d'abord a l'API Evoliz (onglet Balance & Cles API)")
+        if f_meg_art and has_h and st.button("Envoyer les articles vers Evoliz",type="primary",key="btn_meg_art_api"):
+            headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
+            if not cid: st.error("companyid non disponible. Reconnectez-vous.")
+            else:
+                df=_read_meg(f_meg_art); st.dataframe(df.head(10),use_container_width=True)
+                with st.spinner("Lecture articles et classifications existants..."):
+                    url_art=f"https://www.evoliz.io/api/v1/companies/{cid}/articles"
+                    existing={}; page=1
+                    while True:
+                        r=requests.get(url_art,headers=headers,params={"per_page":100,"page":page},timeout=15)
+                        if r.status_code!=200: break
+                        d=r.json()
+                        for it in d.get("data",[]):
+                            ref=(it.get("reference_clean") or it.get("reference") or "").strip().upper()
+                            if ref: existing[ref]=it.get("articleid")
+                        if page>=d.get("meta",{}).get("last_page",1): break
+                        page+=1
+                    sale_cl={}; url_sc=f"https://www.evoliz.io/api/v1/companies/{cid}/sale-classifications"; page=1
+                    while True:
+                        r=requests.get(url_sc,headers=headers,params={"per_page":100,"page":page},timeout=15)
+                        if r.status_code!=200: break
+                        d=r.json()
+                        for it in d.get("data",[]):
+                            c=str(it.get("code","")).strip().upper(); sid=it.get("classificationid") or it.get("id")
+                            if c and sid: sale_cl[c]=sid
+                        if page>=d.get("meta",{}).get("last_page",1): break
+                        page+=1
+                    st.info(f"{len(existing)} articles existants, {len(sale_cl)} classifications de vente")
+                articles=[]
+                for _,row in df.iterrows():
+                    ref=to_clean_str(row.iloc[0]); des=to_clean_str(row.iloc[1])
+                    if not ref and not des: continue
+                    art={"reference":ref or "NOREF","designation":des or ref}
+                    if len(row)>6:
+                        pu=_safe_float(row.iloc[6])
+                        if pu: art["unit_price"]=round(pu,2)
+                    if len(row)>7:
+                        tv=_safe_float(row.iloc[7])
+                        if tv: art["vat_rate"]=round(tv,2)
+                    if len(row)>4:
+                        cc=to_clean_str(row.iloc[4]).upper()
+                        if cc and cc in sale_cl: art["sale_classificationid"]=sale_cl[cc]
+                    articles.append(art)
+                if not articles: st.warning("Aucun article a envoyer.")
+                else:
+                    created=updated=0; errors=[]
+                    prog=st.progress(0,text="Envoi des articles...")
+                    for i,art in enumerate(articles):
+                        ru=art["reference"].upper()
+                        if ru in existing:
+                            r=requests.patch(f"{url_art}/{existing[ru]}",headers=headers,json=art,timeout=15)
+                            if r.status_code in (200,204): updated+=1
+                            else: errors.append(f"MAJ '{art['reference']}': HTTP {r.status_code}")
+                        else:
+                            r=requests.post(url_art,headers=headers,json=art,timeout=15)
+                            if r.status_code in (200,201): created+=1
+                            elif r.status_code==400 and "already been taken" in r.text: updated+=1
+                            else: errors.append(f"Creation '{art['reference']}': HTTP {r.status_code}")
+                        prog.progress((i+1)/len(articles),text=f"Article {i+1}/{len(articles)}")
+                    prog.empty()
+                    parts=[]
+                    if created: parts.append(f"{created} cree(s)")
+                    if updated: parts.append(f"{updated} mis a jour")
+                    if parts: st.success(f"Articles Evoliz : {', '.join(parts)}")
+                    if errors:
+                        with st.expander(f"{len(errors)} erreur(s)",expanded=True):
+                            for e in errors: st.error(e)
