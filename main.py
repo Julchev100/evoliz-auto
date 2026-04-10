@@ -1105,6 +1105,49 @@ with m6:
                 "✔️ Cohérent": "✅" if coherent else "❌",
             })
         st.table(pd.DataFrame(stats))
+
+        # --- Visualisation détaillée des classifications et affectations Evoliz ---
+        st.divider()
+        st.subheader("🔍 Détail des catégories Evoliz (données API)")
+
+        # Comptes comptables
+        with st.expander(f"📖 Comptes comptables ({len(st.session_state.ev_acc_105)})", expanded=False):
+            if st.session_state.ev_acc_105:
+                _acc_rows = []
+                _seen_ids = set()
+                for _k, _v in st.session_state.ev_acc_105.items():
+                    if _v['id'] in _seen_ids: continue
+                    _seen_ids.add(_v['id'])
+                    _acc_rows.append({"Code": _v.get('code', ''), "Libellé": _v.get('label', ''), "ID": _v['id']})
+                _acc_rows.sort(key=lambda x: x["Code"])
+                st.dataframe(pd.DataFrame(_acc_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("Aucun compte chargé.")
+
+        # Classifications et affectations par flux
+        for _flux_name, _flux_label in [("ACHAT", "Classifications achat"), ("VENTE", "Classifications vente"),
+                                         ("ENTRÉE BQ", "Affectations entrées bancaires"), ("SORTIE BQ", "Affectations sorties bancaires")]:
+            _flux_data = st.session_state.ev_data_105.get(_flux_name, {})
+            _unique = {}
+            for _v in _flux_data.values():
+                if _v['id'] not in _unique:
+                    _unique[_v['id']] = _v
+            with st.expander(f"{'📥' if 'ACHAT' in _flux_name or 'SORTIE' in _flux_name else '📤'} {_flux_label} ({len(_unique)})", expanded=False):
+                if _unique:
+                    _rows = []
+                    for _v in _unique.values():
+                        _rows.append({
+                            "Code": _v.get('code', ''),
+                            "Libellé": _v.get('label', ''),
+                            "Compte": _v.get('acc_id', ''),
+                            "TVA": _v.get('vat_id', '') or '',
+                            "ID": _v['id'],
+                        })
+                    _rows.sort(key=lambda x: x["Code"])
+                    st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.caption(f"Aucune {_flux_label.lower()} chargée.")
+
     else:
         st.info("Lancez l'analyse d'abord (onglet Balance)")
 
