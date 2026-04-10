@@ -334,6 +334,7 @@ with m_import:
     st.caption("Centralisez ici tous vos fichiers. Ils seront utilises dans les onglets correspondants.")
 
     # Layout compact : label | browse | statut sur la même ligne
+    # + sélection d'onglet automatique si fichier multi-feuilles
     def _file_row(label, types, session_key, uploader_key):
         c1, c2, c3 = st.columns([1.5, 4, 1.5])
         c1.markdown(f"**{label}**")
@@ -341,6 +342,11 @@ with m_import:
         if _f: st.session_state[session_key] = _f
         loaded = st.session_state.get(session_key)
         c3.markdown(f"✅ {loaded.name}" if loaded else "❌ —")
+        # Si fichier multi-onglets, proposer le sélecteur ici
+        if loaded:
+            _sheet_key = f"_sheet_{session_key}"
+            _chosen = _sheet_selector(loaded, label, _sheet_key)
+            st.session_state[f"{session_key}_sheet"] = _chosen
 
     if mod_compta:
         _file_row("📂 Balance", ["xlsm", "xlsx", "xls"], "imp_file_balance", "imp_balance")
@@ -640,7 +646,7 @@ with m_import:
         if last_bal_path:
             f105 = last_bal_path
     if not f105:
-        st.info("Importez un fichier Balance ci-dessus.")
+        st.info("Chargez vos fichiers ci-dessus.")
 
     if f105:
         xl = None
@@ -668,17 +674,13 @@ with m_import:
         if xl is None:
             st.error("Impossible de lire ce fichier. Essayez de le ré-enregistrer en .xlsx depuis Excel.")
             st.stop()
+        # Utiliser l'onglet choisi à l'import (ou le premier par défaut)
+        _bal_sheet = st.session_state.get("imp_file_balance_sheet", 0)
         if xl == "HTML":
-            sheets = [f"Feuille {i+1}" for i in range(len(st.session_state._bal_html_fallback))]
-            sheet_bal = st.selectbox("Onglet Balance", sheets)
-            sheet_idx = sheets.index(sheet_bal)
+            sheet_idx = _bal_sheet if isinstance(_bal_sheet, int) else 0
             df_bal_preview = st.session_state._bal_html_fallback[sheet_idx]
         else:
-            if len(xl.sheet_names) > 1:
-                sheet_bal = st.selectbox("Onglet Balance", xl.sheet_names)
-            else:
-                sheet_bal = xl.sheet_names[0]
-            # Lecture via l'objet ExcelFile déjà ouvert (évite de ré-ouvrir le fichier)
+            sheet_bal = _bal_sheet if _bal_sheet != 0 and _bal_sheet in xl.sheet_names else xl.sheet_names[0]
             df_bal_preview = xl.parse(sheet_name=sheet_bal)
         cols_preview = df_bal_preview.columns.tolist()
         comptes_4456 = []
@@ -1924,7 +1926,7 @@ with m_cli:
                 st.error("Impossible de lire ce fichier CSV. Verifiez l'encodage.")
                 f_meg_cli = None
         else:
-            _cli_sheet = _sheet_selector(f_meg_cli, "Clients", "sheet_cli")
+            _cli_sheet = st.session_state.get("imp_file_clients_sheet", 0)
             df_src = _read_meg(f_meg_cli, sheet_name=_cli_sheet)
 
         st.caption(f"Fichier lu : **{len(df_src)} lignes**, **{len(df_src.columns)} colonnes**")
@@ -2576,7 +2578,7 @@ with m_four:
                 st.error("Impossible de lire ce fichier CSV.")
                 f_meg_four = None
         else:
-            _four_sheet = _sheet_selector(f_meg_four, "Fournisseurs", "sheet_four")
+            _four_sheet = st.session_state.get("imp_file_fournisseurs_sheet", 0)
             df_four = _read_meg(f_meg_four, sheet_name=_four_sheet)
 
         if f_meg_four and df_four is not None:
