@@ -2526,7 +2526,7 @@ with m_cli:
                             _upd("Siren", siren); _upd("Siret", siret)
                             if siren and "Type *" in df_e.columns:
                                 _nj = str(ent.get("nature_juridique", "")).strip()
-                                _new_t = "Administration publique" if _nj and _nj[:1] in ("7", "4") else "Professionnel"
+                                _new_t = "Administration publique" if _nj and _nj[:1] in ("7", "1") else ("Particulier" if _nj and _nj[:1] == "9" else "Professionnel")
                                 df_e.at[idx, "Type *"] = _new_t; new_sc.add((idx, "Type *"))
                             _upd("APE / NAF", ent.get("activite_principale", ""))
                             _upd("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
@@ -2639,8 +2639,10 @@ with m_cli:
                     # 7xxx/4xxx = Administration publique, sinon = Professionnel
                     if siren and "Type *" in df_e.columns:
                         _nj = str(ent.get("nature_juridique", "")).strip()
-                        if _nj and _nj[:1] in ("7", "4"):
+                        if _nj and _nj[:1] in ("7", "1"):
                             _new_type = "Administration publique"
+                        elif _nj and _nj[:1] == "9":
+                            _new_type = "Particulier"
                         else:
                             _new_type = "Professionnel"
                         if df_e.at[idx, "Type *"] != _new_type:
