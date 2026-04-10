@@ -2722,7 +2722,7 @@ with m_cli:
                             rs = res.get("siren","")
                             rsie = (res.get("siege") or {})
                             suggestions.append({"nom": rn, "siren": rs, "ville": rsie.get("libelle_commune",""), "activite": _naf_label(rsie.get("activite_principale","")), "_raw": res})
-                        if "meg_sirene_suggestions" not in st.session_state:
+                        if not st.session_state.get("meg_sirene_suggestions"):
                             st.session_state["meg_sirene_suggestions"] = {}
                         st.session_state["meg_sirene_suggestions"][idx] = {"client": nom, "code": code, "search": query, "suggestions": suggestions}
                         not_found_count += 1
