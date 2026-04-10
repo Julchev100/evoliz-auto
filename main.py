@@ -220,7 +220,7 @@ st.title("🍌 Banana Import Club")
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
                          ('ev_acc_105', {}), ('ev_data_105', {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}),
-                         ('token_headers_105', {}), ('company_id_105', None), ('eraz_log', []),
+                         ('token_headers_105', {}), ('company_id_105', None), ('companies_list', []), ('eraz_log', []),
                          ('eraz_counts', {"COMPTE": 0, "ACHAT": 0, "VENTE": 0, "ENTRÉE BQ": 0, "SORTIE BQ": 0}),
                          ('eraz_items', {})]:
     if key not in st.session_state:
@@ -437,8 +437,9 @@ with m2:
     pk_105 = col_pk.text_input("Public Key", value=saved_pk, key="pk_105")
     sk_105 = col_sk.text_input("Secret Key", type="password", value=saved_sk, key="sk_105")
 
+    # --- Bloc 1 : Login (récupère le token + liste des dossiers accessibles) ---
     auto_connect = not st.session_state.token_headers_105 and saved_pk and saved_sk
-    if auto_connect or st.button("🔗 CONNECTER & LIRE API", type="primary", use_container_width=True, key="btn_connect_105"):
+    if auto_connect or st.button("🔗 CONNECTER", type="primary", use_container_width=True, key="btn_connect_105"):
         if pk_105 and sk_105:
             save_creds(pk_105, sk_105)
             with st.spinner("Connexion à Evoliz en cours..."):
@@ -454,59 +455,102 @@ with m2:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
-                cid = login_data.get('companyid')
-                if not cid:
-                    try:
-                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h, timeout=15)
-                        if r_co.status_code == 200:
-                            companies = r_co.json().get('data', [])
-                            if companies:
-                                cid = companies[0].get('companyid') or companies[0].get('id')
-                    except:
-                        pass
-                st.session_state.company_id_105 = cid
-                with st.spinner("Lecture des données comptables Evoliz..."):
-                    st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", h)
-                    st.session_state.ev_data_105 = {
-                        "ACHAT": fetch_evoliz_data("purchase-classifications", h),
-                        "VENTE": fetch_evoliz_data("sale-classifications", h),
-                        "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", h),
-                        "SORTIE BQ": fetch_evoliz_data("purchase-affectations", h),
-                    }
-                # Lecture clients, articles, factures
-                _base = f"https://www.evoliz.io/api/v1/companies/{cid}" if cid else "https://www.evoliz.io/api/v1"
-                with st.spinner("Lecture des clients Evoliz..."):
-                    _ev_clients = []; _pg = 1
-                    while True:
-                        _r = requests.get(f"{_base}/clients", headers=h, params={"per_page": 100, "page": _pg}, timeout=15)
-                        if _r.status_code != 200: break
-                        _d = _r.json(); _ev_clients.extend(_d.get("data", []))
-                        if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                        _pg += 1
-                    st.session_state["ev_clients_raw"] = _ev_clients
-                with st.spinner("Lecture des articles Evoliz..."):
-                    _ev_articles = []; _pg = 1
-                    while True:
-                        _r = requests.get(f"{_base}/articles", headers=h, params={"per_page": 100, "page": _pg}, timeout=15)
-                        if _r.status_code != 200: break
-                        _d = _r.json(); _ev_articles.extend(_d.get("data", []))
-                        if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                        _pg += 1
-                    st.session_state["ev_articles_raw"] = _ev_articles
-                with st.spinner("Lecture des factures Evoliz (30 derniers jours)..."):
-                    from datetime import timedelta
-                    _date_from = (dt_datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-                    _ev_invoices = []; _pg = 1
-                    while True:
-                        _r = requests.get(f"{_base}/invoices", headers=h, params={"per_page": 100, "page": _pg, "created_after": _date_from}, timeout=15)
-                        if _r.status_code != 200: break
-                        _d = _r.json(); _ev_invoices.extend(_d.get("data", []))
-                        if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                        _pg += 1
-                    st.session_state["ev_invoices_raw"] = _ev_invoices
-                st.success(f"Connecté à Evoliz (company: {cid}) — {len(_ev_clients)} clients, {len(_ev_articles)} articles, {len(_ev_invoices)} factures (30j)")
+                # Découverte des dossiers accessibles
+                _companies = []
+                try:
+                    r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h, timeout=15)
+                    if r_co.status_code == 200:
+                        _companies = r_co.json().get('data', [])
+                except:
+                    pass
+                st.session_state.companies_list = _companies
+                if len(_companies) == 1:
+                    st.session_state.company_id_105 = _companies[0].get('companyid') or _companies[0].get('id')
+                    st.success(f"Connecté à Evoliz — dossier : {_companies[0].get('name', 'N/C')}")
+                elif len(_companies) > 1:
+                    st.session_state.company_id_105 = None
+                    st.success(f"Connecté à Evoliz — {len(_companies)} dossiers accessibles. Sélectionnez un dossier ci-dessous.")
+                else:
+                    # Pas de scope prescriber_users ou token mono-dossier sans /companies
+                    cid = login_data.get('companyid')
+                    st.session_state.company_id_105 = cid
+                    st.success(f"Connecté à Evoliz (company: {cid})")
             elif r_log:
                 st.error(f"Échec login : HTTP {r_log.status_code}")
+
+    # --- Bloc 2 : Sélecteur de dossier (multi-company) ---
+    _companies = st.session_state.get('companies_list', [])
+    if st.session_state.token_headers_105 and len(_companies) > 1:
+        st.divider()
+        st.subheader("📁 Sélection du dossier")
+        _company_names = [f"{c.get('name', 'N/C')} (ID: {c.get('companyid') or c.get('id')})" for c in _companies]
+        _company_ids = [c.get('companyid') or c.get('id') for c in _companies]
+        _prev_cid = st.session_state.company_id_105
+        _default_idx = _company_ids.index(_prev_cid) if _prev_cid in _company_ids else 0
+        _sel_idx = st.selectbox("Dossier Evoliz", range(len(_company_names)),
+                                format_func=lambda i: _company_names[i],
+                                index=_default_idx, key="company_select")
+        _sel_cid = _company_ids[_sel_idx]
+        if _sel_cid != _prev_cid:
+            st.session_state.company_id_105 = _sel_cid
+            # Réinitialiser les données du précédent dossier
+            st.session_state.ev_acc_105 = {}
+            st.session_state.ev_data_105 = {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}
+            for _k in ("ev_clients_raw", "ev_articles_raw", "ev_invoices_raw"):
+                st.session_state[_k] = []
+            st.rerun()
+
+    # --- Bloc 3 : Chargement des données (auto dès qu'un dossier est sélectionné) ---
+    _cid = st.session_state.company_id_105
+    _h = st.session_state.token_headers_105
+    _data_empty = not (st.session_state.ev_acc_105 or st.session_state.get("ev_clients_raw") or st.session_state.get("ev_articles_raw") or st.session_state.get("ev_invoices_raw"))
+    if _h and _cid and _data_empty:
+        _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
+        with st.spinner("Lecture des données comptables Evoliz..."):
+            st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", _h)
+            st.session_state.ev_data_105 = {
+                "ACHAT": fetch_evoliz_data("purchase-classifications", _h),
+                "VENTE": fetch_evoliz_data("sale-classifications", _h),
+                "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", _h),
+                "SORTIE BQ": fetch_evoliz_data("purchase-affectations", _h),
+            }
+        with st.spinner("Lecture des clients Evoliz..."):
+            _ev_clients = []; _pg = 1
+            while True:
+                _r = requests.get(f"{_base}/clients", headers=_h, params={"per_page": 100, "page": _pg}, timeout=15)
+                if _r.status_code != 200: break
+                _d = _r.json(); _ev_clients.extend(_d.get("data", []))
+                if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                _pg += 1
+            st.session_state["ev_clients_raw"] = _ev_clients
+        with st.spinner("Lecture des articles Evoliz..."):
+            _ev_articles = []; _pg = 1
+            while True:
+                _r = requests.get(f"{_base}/articles", headers=_h, params={"per_page": 100, "page": _pg}, timeout=15)
+                if _r.status_code != 200: break
+                _d = _r.json(); _ev_articles.extend(_d.get("data", []))
+                if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                _pg += 1
+            st.session_state["ev_articles_raw"] = _ev_articles
+        with st.spinner("Lecture des factures Evoliz (30 derniers jours)..."):
+            from datetime import timedelta
+            _date_from = (dt_datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            _ev_invoices = []; _pg = 1
+            while True:
+                _r = requests.get(f"{_base}/invoices", headers=_h, params={"per_page": 100, "page": _pg, "created_after": _date_from}, timeout=15)
+                if _r.status_code != 200: break
+                _d = _r.json(); _ev_invoices.extend(_d.get("data", []))
+                if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                _pg += 1
+            st.session_state["ev_invoices_raw"] = _ev_invoices
+        _company_name = ""
+        for _c in st.session_state.get('companies_list', []):
+            if (_c.get('companyid') or _c.get('id')) == _cid:
+                _company_name = _c.get('name', '')
+                break
+        st.success(f"Dossier « {_company_name or _cid} » chargé — {len(_ev_clients)} clients, {len(_ev_articles)} articles, {len(_ev_invoices)} factures (30j)")
+    elif _h and not _cid and len(_companies) > 1:
+        st.info("👆 Sélectionnez un dossier ci-dessus pour charger les données.")
 
     _has_any_data = (st.session_state.ev_acc_105
                       or st.session_state.get("ev_clients_raw")
@@ -1747,12 +1791,24 @@ with m_cli:
     if f_meg_cli:
         # Lecture du fichier
         if f_meg_cli.name.lower().endswith(".csv"):
-            f_meg_cli.seek(0)
-            try:
-                df_src = pd.read_csv(f_meg_cli, sep=None, engine="python", header=0)
-            except Exception:
-                f_meg_cli.seek(0)
-                df_src = pd.read_csv(f_meg_cli, sep=";", header=0)
+            # Essayer plusieurs encodages (utf-8, latin-1, cp1252)
+            df_src = None
+            for _enc in ["utf-8", "latin-1", "cp1252"]:
+                for _sep in [None, ";", ","]:
+                    try:
+                        f_meg_cli.seek(0)
+                        _kw = {"header": 0, "encoding": _enc}
+                        if _sep: _kw["sep"] = _sep
+                        else: _kw["sep"] = None; _kw["engine"] = "python"
+                        df_src = pd.read_csv(f_meg_cli, **_kw)
+                        if len(df_src.columns) > 1: break
+                        df_src = None
+                    except Exception:
+                        df_src = None
+                if df_src is not None: break
+            if df_src is None:
+                st.error("Impossible de lire ce fichier CSV. Verifiez l'encodage.")
+                f_meg_cli = None
         else:
             df_src = _read_meg(f_meg_cli)
 
@@ -1933,12 +1989,8 @@ with m_cli:
                 headers = st.session_state.token_headers_105
                 cid = st.session_state.company_id_105
                 if not cid:
-                    try:
-                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=headers, timeout=15)
-                        if r_co.status_code == 200:
-                            cos = r_co.json().get("data", [])
-                            if cos: cid = cos[0].get("companyid") or cos[0].get("id"); st.session_state.company_id_105 = cid
-                    except Exception: pass
+                    st.error("Aucun dossier sélectionné. Retournez dans l'onglet Connexion API.")
+                    st.stop()
 
                 def _get(row, field):
                     col = mapping.get(field)
