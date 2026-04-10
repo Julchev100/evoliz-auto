@@ -2505,56 +2505,18 @@ with m_cli:
                     df_preview_c.at[i, "Type *"] = _new_type
                     st.session_state["meg_df_clients"] = df_preview_c
 
-        # Détecter les SIREN modifiés et relancer la recherche
+        # Persister les SIREN saisis manuellement dans df_preview_c (sans appel API)
         if "Siren" in edited.columns:
-            _siren_changed = []
+            _siren_pending = []
             for i in edited.index:
-                # Comparer contre la source (df_preview_c), pas contre df_show (filtré/formaté)
                 _old_raw = to_clean_str(df_preview_c.at[i, "Siren"]) if "Siren" in df_preview_c.columns and i in df_preview_c.index else ""
                 _new = str(edited.at[i, "Siren"]).replace("🟢 ", "").strip()
                 if _new and _new != _old_raw and len(_new) >= 9 and _new.isdigit():
-                    _siren_changed.append((i, _new))
-            if _siren_changed:
-                with st.spinner(f"Recherche Sirene pour {len(_siren_changed)} SIREN modifié(s)..."):
-                    df_e = df_preview_c.copy()
-                    new_sc = set(sirene_cells); new_si = dict(sirene_info)
-                    for idx, siren_val in _siren_changed:
-                        try:
-                            r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
-                                             params={"q": siren_val, "per_page": 1, "page": 1}, timeout=10)
-                            if r.status_code != 200: continue
-                            results = r.json().get("results", [])
-                            if not results: st.warning(f"SIREN {siren_val} : aucun résultat"); continue
-                            ent = results[0]; siege = ent.get("siege", {})
-                            siren = ent.get("siren", ""); siret = siege.get("siret", "")
-                            nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale", ""))
-                            new_si[idx] = {"nom": nom_t, "activite": _naf_label(siege.get("activite_principale", "")),
-                                           "ville": siege.get("libelle_commune", "")}
-                            def _upd(col, val):
-                                if col in df_e.columns and val:
-                                    df_e.at[idx, col] = val; new_sc.add((idx, col))
-                            _upd("Siren", siren); _upd("Siret", siret)
-                            if siren and "Type *" in df_e.columns:
-                                _nj = str(ent.get("nature_juridique", "")).strip()
-                                _new_t = "Administration publique" if _nj and _nj[:1] in ("7", "1") else ("Particulier" if _nj and _nj[:1] == "9" else "Professionnel")
-                                df_e.at[idx, "Type *"] = _new_t; new_sc.add((idx, "Type *"))
-                            _upd("APE / NAF", ent.get("activite_principale", ""))
-                            _upd("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
-                            if siren and "TVA intracommunautaire" in df_e.columns:
-                                tv = f"FR{(12 + 3 * (int(siren) % 97)) % 97:02d}{siren}"
-                                _upd("TVA intracommunautaire", tv)
-                            pts = [siege.get("numero_voie", ""), siege.get("type_voie", ""), siege.get("libelle_voie", "")]
-                            _upd("Adresse", " ".join(p for p in pts if p))
-                            _upd("Code postal *", siege.get("code_postal", ""))
-                            _upd("Ville *", siege.get("libelle_commune", ""))
-                            st.success(f"SIREN {siren_val} → **{nom_t}** ({siege.get('libelle_commune', '')})")
-                        except Exception as exc:
-                            st.error(f"SIREN {siren_val} : {exc}")
-                    st.session_state["meg_df_clients"] = df_e
-                    st.session_state["meg_sirene_cells"] = new_sc
-                    st.session_state["meg_sirene_info"] = new_si
-                    st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
-                    st.rerun()
+                    df_preview_c.at[i, "Siren"] = _new
+                    _siren_pending.append((i, _new))
+            if _siren_pending:
+                st.session_state["meg_df_clients"] = df_preview_c
+                st.info(f"💾 {len(_siren_pending)} SIREN saisi(s) — cliquez « 🔍 Enrichissement 2ème lame » ci-dessous pour compléter les données.")
 
         # --- CR enrichissement ---
         if st.session_state.get("meg_sirene_stats"):
@@ -2581,10 +2543,69 @@ with m_cli:
                         return [""]*len(row)
                     st.dataframe(df_log.style.apply(_cl, axis=1), use_container_width=True, hide_index=True)
 
-        # --- Enrichissement SIRENE ---
+        # --- Enrichissement 2ème lame (SIREN saisis manuellement) ---
+        # Compter les SIREN présents dans le tableau mais pas encore enrichis
+        _siren_a_traiter = []
+        if "Siren" in df_preview_c.columns:
+            for i in df_preview_c.index:
+                _s = to_clean_str(df_preview_c.at[i, "Siren"])
+                if _s and len(_s) >= 9 and _s.isdigit() and i not in sirene_info:
+                    _siren_a_traiter.append((i, _s))
+        if _siren_a_traiter:
+            st.divider()
+            st.subheader(f"🔍 Enrichissement 2ème lame — {len(_siren_a_traiter)} SIREN à traiter")
+            st.caption("SIREN saisis manuellement et non encore enrichis.")
+            if st.button(f"🔍 Enrichir les {len(_siren_a_traiter)} SIREN", type="primary", use_container_width=True, key="btn_sirene_2eme"):
+                df_e = df_preview_c.copy()
+                new_sc = set(sirene_cells); new_si = dict(sirene_info)
+                _ok = _ko = 0
+                progress = st.progress(0, text="Enrichissement 2ème lame...")
+                for _n, (idx, siren_val) in enumerate(_siren_a_traiter):
+                    progress.progress((_n + 1) / len(_siren_a_traiter), text=f"{_n + 1}/{len(_siren_a_traiter)} — SIREN {siren_val}")
+                    try:
+                        r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                         params={"q": siren_val, "per_page": 1, "page": 1}, timeout=10)
+                        if r.status_code == 429: time.sleep(2); r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params={"q": siren_val, "per_page": 1, "page": 1}, timeout=10)
+                        if r.status_code != 200: _ko += 1; time.sleep(0.15); continue
+                        results = r.json().get("results", [])
+                        if not results: _ko += 1; time.sleep(0.15); continue
+                        ent = results[0]; siege = ent.get("siege", {})
+                        siren = ent.get("siren", ""); siret = siege.get("siret", "")
+                        nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale", ""))
+                        new_si[idx] = {"nom": nom_t, "activite": _naf_label(siege.get("activite_principale", "")),
+                                       "ville": siege.get("libelle_commune", "")}
+                        def _upd2(col, val):
+                            if col in df_e.columns and val:
+                                df_e.at[idx, col] = val; new_sc.add((idx, col))
+                        _upd2("Siren", siren); _upd2("Siret", siret)
+                        if siren and "Type *" in df_e.columns:
+                            _nj = str(ent.get("nature_juridique", "")).strip()
+                            _new_t = "Administration publique" if _nj and _nj[:1] in ("7", "1") else ("Particulier" if _nj and _nj[:1] == "9" else "Professionnel")
+                            df_e.at[idx, "Type *"] = _new_t; new_sc.add((idx, "Type *"))
+                        _upd2("APE / NAF", ent.get("activite_principale", ""))
+                        _upd2("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
+                        if siren and "TVA intracommunautaire" in df_e.columns:
+                            tv = f"FR{(12 + 3 * (int(siren) % 97)) % 97:02d}{siren}"
+                            _upd2("TVA intracommunautaire", tv)
+                        pts = [siege.get("numero_voie", ""), siege.get("type_voie", ""), siege.get("libelle_voie", "")]
+                        _upd2("Adresse", " ".join(p for p in pts if p))
+                        _upd2("Code postal *", siege.get("code_postal", "")); _upd2("Ville *", siege.get("libelle_commune", ""))
+                        _ok += 1
+                        time.sleep(0.15)
+                    except Exception:
+                        _ko += 1
+                progress.empty()
+                st.session_state["meg_df_clients"] = df_e
+                st.session_state["meg_sirene_cells"] = new_sc
+                st.session_state["meg_sirene_info"] = new_si
+                st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                st.success(f"2ème lame terminée : {_ok} enrichi(s), {_ko} non trouvé(s)")
+                st.rerun()
+
+        # --- Enrichissement SIRENE (1ère lame — par nom) ---
         st.divider()
         enrich_all = st.checkbox("Inclure aussi les Particuliers", value=False, key="sirene_all")
-        if st.button("🔍 Enrichir via Sirene", use_container_width=True, key="btn_sirene"):
+        if st.button("🔍 Enrichir via Sirene (par nom)", use_container_width=True, key="btn_sirene"):
             st.session_state["meg_enrichir_flags"] = {}
             df_e = df_preview_c.copy()
             enriched = skipped = already_complete = not_found_count = 0
