@@ -271,6 +271,11 @@ with st.sidebar:
             _f_param_sb = st.file_uploader("Importer un fichier parametres", type=["xlsm", "xlsx", "xls"], key="imp_param_sb", label_visibility="collapsed")
             if _f_param_sb: st.session_state["imp_file_param"] = _f_param_sb
             show_param = st.checkbox("Voir / éditer les paramètres", value=False, key="show_param")
+            if show_param:
+                # Élargir la sidebar pour voir le tableau confortablement
+                st.markdown("""<style>
+                    [data-testid="stSidebar"] { min-width: 600px; max-width: 800px; }
+                </style>""", unsafe_allow_html=True)
             if show_param and not st.session_state.nr_v62.empty:
                 _edited_sb = st.data_editor(
                     st.session_state.nr_v62, num_rows="dynamic", use_container_width=True, key="param_editor_sb"
@@ -330,8 +335,6 @@ _tab_keys = []
 _tab_names.append("🔑 Connexion API"); _tab_keys.append("api")
 _tab_names.append("📁 Import fichiers"); _tab_keys.append("import")
 if mod_compta:
-    if show_param:
-        _tab_names.append("⚙️ Param"); _tab_keys.append("param")
     _tab_names.append("🔍 Matrice comptable"); _tab_keys.append("matrice")
 if mod_clients:
     _tab_names.append("👥 Injection Clients"); _tab_keys.append("clients")
@@ -348,7 +351,7 @@ _tab_map = {k: t for k, t in zip(_tab_keys, _tabs)}
 # Aliases pour compatibilite avec le code existant
 m2 = _tab_map.get("api", st.container())
 m_import = _tab_map.get("import", st.container())
-m1 = _tab_map.get("param", st.container())
+m1 = st.container()  # Onglet Param supprimé, paramètres dans la sidebar
 m4 = _tab_map.get("matrice", st.container())
 m6 = _tab_map.get("synthese", st.container())
 m7 = _tab_map.get("synchro", st.container())
@@ -357,7 +360,7 @@ m_four = _tab_map.get("fournisseurs", st.container())
 m_fac = _tab_map.get("factures", st.container())
 m_art = _tab_map.get("articles", st.container())
 # Flags pour conditionner l'execution du contenu
-_has_param_tab = "param" in _tab_map
+_has_param_tab = False
 _has_matrice_tab = "matrice" in _tab_map
 _has_synthese_tab = "synthese" in _tab_map
 _has_synchro_tab = "synchro" in _tab_map
@@ -485,33 +488,6 @@ if _f_param_loaded:
             save_param_local(st.session_state.nr_v62)
     except Exception:
         pass
-
-if show_param:
-    with m1:
-        st.subheader("⚙️ Racines & Tags de flux")
-
-        # Affichage / édition
-        st.session_state.nr_v62 = st.data_editor(
-            st.session_state.nr_v62, num_rows="dynamic", use_container_width=True
-        )
-
-        # Sauvegarde manuelle après édition
-        if st.button("💾 Sauvegarder les paramètres", key="btn_save_param"):
-            save_param_local(st.session_state.nr_v62)
-            st.success(f"Paramètres sauvegardés dans {PARAM_PATH}")
-
-        # Téléchargement des paramètres
-        if not st.session_state.nr_v62.empty:
-            st.download_button(
-                "📥 Télécharger les paramètres (CSV)",
-                data=st.session_state.nr_v62.to_csv(index=False),
-                file_name="param_local.csv",
-                mime="text/csv",
-                key="btn_download_param"
-            )
-
-        if os.path.exists(PARAM_PATH):
-            st.caption(f"📁 Fichier local : {PARAM_PATH}")
 
 with m2:
     # --- Clés API ---
