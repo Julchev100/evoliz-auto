@@ -2996,6 +2996,22 @@ with m_cli:
                     disabled=["Code", "Nom"], column_config=_col_cfg,
                     key=f"edit_missing_{st.session_state.get('meg_editor_ver', 0)}")
 
+                if st.button("🔄 Compléter les vides (CP=00000, Ville=Inconnue, Pays=FR, Type=Particulier)", use_container_width=True, key="btn_fill_defaults"):
+                    _filled = 0
+                    for mr in _missing_rows:
+                        _orig_idx = mr["idx"]
+                        _defaults = {"Code postal *": "00000", "Ville *": "Inconnue", "Code pays (ISO 2) *": "FR", "Type *": "Particulier"}
+                        for col, default_val in _defaults.items():
+                            if col in df_preview_c.columns:
+                                _cur = to_clean_str(df_preview_c.at[_orig_idx, col])
+                                if not _cur or _cur in ("NC", "nan"):
+                                    df_preview_c.at[_orig_idx, col] = default_val
+                                    _filled += 1
+                    if _filled:
+                        st.session_state["meg_df_clients"] = df_preview_c
+                        st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                        st.rerun()
+
                 if st.button("💾 Appliquer les corrections", use_container_width=True, key="btn_apply_missing"):
                     _applied = 0
                     for _i, _er in enumerate(_edit_rows):
