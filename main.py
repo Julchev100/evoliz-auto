@@ -1079,14 +1079,46 @@ with m4:
                         seen_ids.add(d['id'])
                 orphans_by_cat[flux] = orphans
 
-            st.session_state.eraz_items = orphans_by_cat
+            # Init des exclusions de suppression
+            if "_skip_delete" not in st.session_state:
+                st.session_state._skip_delete = set()  # ensemble de (cat, id) à ne PAS supprimer
+
             total_orphans = sum(len(v) for v in orphans_by_cat.values())
-            st.subheader(f"🧹 {total_orphans} éléments API à supprimer")
+            _n_skipped_del = len(st.session_state._skip_delete)
+            _n_effective = total_orphans - _n_skipped_del
+            st.subheader(f"🧹 {total_orphans} éléments orphelins ({_n_effective} à supprimer)")
 
             for cat, items in orphans_by_cat.items():
                 if items:
-                    with st.expander(f"{cat} — {len(items)} orphelins"):
-                        st.dataframe(pd.DataFrame(items)[['Code', 'Libellé']], use_container_width=True)
+                    with st.expander(f"{cat} — {len(items)} orphelins", expanded=False):
+                        # Tout cocher / tout décocher
+                        _all_keys = [(cat, it['id']) for it in items]
+                        _all_checked = all(k not in st.session_state._skip_delete for k in _all_keys)
+                        _toggle = st.checkbox(f"Tout supprimer ({cat})", value=_all_checked, key=f"toggle_del_{cat}")
+                        for it in items:
+                            _key = (cat, it['id'])
+                            _default = _key not in st.session_state._skip_delete
+                            if _toggle != _all_checked:
+                                # L'utilisateur vient de basculer le toggle global
+                                _default = _toggle
+                            _cb = st.checkbox(
+                                f"`{it['Code']}` — {it['Libellé']}",
+                                value=_default,
+                                key=f"cb_del_{cat}_{it['id']}",
+                            )
+                            if not _cb:
+                                st.session_state._skip_delete.add(_key)
+                            else:
+                                st.session_state._skip_delete.discard(_key)
+
+            # Filtrer les eraz_items pour ne garder que ceux non exclus
+            _filtered_eraz = {}
+            for cat, items in orphans_by_cat.items():
+                _filtered_eraz[cat] = [it for it in items if (cat, it['id']) not in st.session_state._skip_delete]
+            st.session_state.eraz_items = _filtered_eraz
+
+            if _n_skipped_del:
+                st.info(f"⏭️ {_n_skipped_del} élément(s) exclus de la suppression.")
 
             if not total_orphans:
                 st.success("Aucun orphelin détecté")
