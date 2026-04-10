@@ -270,7 +270,19 @@ with st.sidebar:
         with st.expander("📂 Parametres comptables", expanded=False):
             _f_param_sb = st.file_uploader("Importer un fichier parametres", type=["xlsm", "xlsx", "xls"], key="imp_param_sb", label_visibility="collapsed")
             if _f_param_sb: st.session_state["imp_file_param"] = _f_param_sb
-            show_param = st.checkbox("Voir les parametres comptables", value=False, key="show_param")
+            show_param = st.checkbox("Voir / éditer les paramètres", value=False, key="show_param")
+            if show_param and not st.session_state.nr_v62.empty:
+                _edited_sb = st.data_editor(
+                    st.session_state.nr_v62, num_rows="dynamic", use_container_width=True, key="param_editor_sb"
+                )
+                if st.button("💾 Sauvegarder", key="btn_save_param_sb"):
+                    st.session_state.nr_v62 = _edited_sb
+                    save_param_local(_edited_sb)
+                    st.success("Sauvegardé")
+                st.download_button(
+                    "📥 CSV", data=st.session_state.nr_v62.to_csv(index=False),
+                    file_name="param_local.csv", mime="text/csv", key="btn_dl_param_sb"
+                )
             fusion_tva = st.checkbox("Fusionner classif. par taux TVA", value=True, key="fusion_tva",
                                       help="Si coche, les classifications 6xx/7xx qui ne different que par le taux de TVA sont regroupees en une seule.")
             tva_achat_rate = st.number_input("Taux TVA achats (%)", value=20.0, step=0.5, min_value=0.0, max_value=100.0, key="tva_achat_rate",
