@@ -468,17 +468,26 @@ with m2:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
-                # Découverte des dossiers accessibles
+                # Découverte des dossiers accessibles (paginé)
                 _companies = []
                 _co_error = None
                 try:
-                    r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h, timeout=15)
-                    if r_co.status_code == 200:
-                        _companies = r_co.json().get('data', [])
-                    elif r_co.status_code == 403:
-                        _co_error = "scope prescriber_users absent — mode mono-dossier"
-                    else:
-                        _co_error = f"HTTP {r_co.status_code}"
+                    _pg = 1
+                    while True:
+                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
+                                            params={"per_page": 100, "page": _pg}, timeout=15)
+                        if r_co.status_code == 200:
+                            _d = r_co.json()
+                            _companies.extend(_d.get('data', []))
+                            if _pg >= _d.get("meta", {}).get("last_page", 1):
+                                break
+                            _pg += 1
+                        elif r_co.status_code == 403:
+                            _co_error = "scope prescriber_users absent — mode mono-dossier"
+                            break
+                        else:
+                            _co_error = f"HTTP {r_co.status_code}"
+                            break
                 except Exception as e:
                     _co_error = str(e)
                 st.session_state.companies_list = _companies
