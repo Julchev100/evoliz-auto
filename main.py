@@ -2599,6 +2599,17 @@ with m_cli:
                 st.session_state["meg_sirene_cells"] = new_sc
                 st.session_state["meg_sirene_info"] = new_si
                 st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                # Mettre à jour les stats d'enrichissement globales
+                _prev_stats = st.session_state.get("meg_sirene_stats") or {"enriched": 0, "already_complete": 0, "not_found": 0, "skipped": 0}
+                st.session_state["meg_sirene_stats"] = {
+                    "enriched": _prev_stats["enriched"] + _ok,
+                    "already_complete": _prev_stats["already_complete"],
+                    "not_found": _prev_stats["not_found"] - _ok + _ko,  # ceux trouvés en 2ème lame ne sont plus "non trouvés"
+                    "skipped": _prev_stats["skipped"],
+                }
+                # Corriger : not_found ne peut pas être négatif
+                if st.session_state["meg_sirene_stats"]["not_found"] < 0:
+                    st.session_state["meg_sirene_stats"]["not_found"] = _ko
                 st.session_state["_2eme_lame_result"] = f"2ème lame terminée : {_ok} enrichi(s), {_ko} non trouvé(s)"
                 st.rerun()
             # Afficher le résultat persistant
