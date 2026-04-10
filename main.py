@@ -2996,11 +2996,26 @@ with m_cli:
                     disabled=["Code", "Nom"], column_config=_col_cfg,
                     key=f"edit_missing_{st.session_state.get('meg_editor_ver', 0)}")
 
-                if st.button("🔄 Compléter les vides (CP=00000, Ville=Inconnue, Pays=FR, Type=Particulier)", use_container_width=True, key="btn_fill_defaults"):
+                _c1_fill, _c2_fill = st.columns([3, 1])
+                _type_to_apply = _c2_fill.selectbox("Type à appliquer", ["Particulier", "Professionnel", "Administration publique"], key="fill_type_sel")
+                if _c1_fill.button(f"🏷️ Appliquer « {_type_to_apply} » aux clients sans type", use_container_width=True, key="btn_fill_type"):
+                    _t_filled = 0
+                    if "Type *" in df_preview_c.columns:
+                        for idx in df_preview_c.index:
+                            _cur_t = to_clean_str(df_preview_c.at[idx, "Type *"])
+                            if not _cur_t or _cur_t in ("NC", "nan"):
+                                df_preview_c.at[idx, "Type *"] = _type_to_apply
+                                _t_filled += 1
+                    if _t_filled:
+                        st.session_state["meg_df_clients"] = df_preview_c
+                        st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                        st.rerun()
+
+                if st.button("🔄 Compléter les vides (CP=00000, Ville=Inconnue, Pays=FR)", use_container_width=True, key="btn_fill_defaults"):
                     _filled = 0
                     for mr in _missing_rows:
                         _orig_idx = mr["idx"]
-                        _defaults = {"Code postal *": "00000", "Ville *": "Inconnue", "Code pays (ISO 2) *": "FR", "Type *": "Particulier"}
+                        _defaults = {"Code postal *": "00000", "Ville *": "Inconnue", "Code pays (ISO 2) *": "FR"}
                         for col, default_val in _defaults.items():
                             if col in df_preview_c.columns:
                                 _cur = to_clean_str(df_preview_c.at[_orig_idx, col])
