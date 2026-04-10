@@ -56,9 +56,12 @@ def get_correct_id(item, endpoint):
         return item.get('accountid') or item.get('id')
     return item.get('id')
 
-def fetch_evoliz_data(endpoint, headers):
+def fetch_evoliz_data(endpoint, headers, company_id=None):
     results = {}
-    url = f"https://www.evoliz.io/api/v1/{endpoint}"
+    if company_id:
+        url = f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}"
+    else:
+        url = f"https://www.evoliz.io/api/v1/{endpoint}"
     params = {"per_page": 100, "page": 1}
     is_account = endpoint == "accounts"
     try:
@@ -612,12 +615,12 @@ with m2:
     if _should_load:
         _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
         with st.spinner("Lecture des données comptables Evoliz..."):
-            st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", _h)
+            st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", _h, company_id=_cid)
             st.session_state.ev_data_105 = {
-                "ACHAT": fetch_evoliz_data("purchase-classifications", _h),
-                "VENTE": fetch_evoliz_data("sale-classifications", _h),
-                "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", _h),
-                "SORTIE BQ": fetch_evoliz_data("purchase-affectations", _h),
+                "ACHAT": fetch_evoliz_data("purchase-classifications", _h, company_id=_cid),
+                "VENTE": fetch_evoliz_data("sale-classifications", _h, company_id=_cid),
+                "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", _h, company_id=_cid),
+                "SORTIE BQ": fetch_evoliz_data("purchase-affectations", _h, company_id=_cid),
             }
         with st.spinner("Lecture des clients Evoliz..."):
             _ev_clients = []; _pg = 1
@@ -1244,7 +1247,7 @@ with m7:
             # Rafraîchir les comptes après DEL+POST pour avoir les nouveaux id
             if not patch_accounts.empty:
                 time.sleep(1)
-                st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers)
+                st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
 
             # --- 3. PATCH flux (parallèle) ---
             patch_tasks = []
@@ -1288,7 +1291,7 @@ with m7:
             # Rafraîchir les comptes pour résoudre les accountid des flux à créer
             time.sleep(2)  # Pause pour laisser l'API digérer les créations
             with st.spinner("Rafraîchissement des comptes..."):
-                st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers)
+                st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
 
             # --- 5. CREATE flux (parallèle) ---
             flux_tasks = []
@@ -1325,12 +1328,12 @@ with m7:
             st.success(f"Terminé : {ok_count}/{len(log)} opérations réussies")
 
             with st.spinner("Rafraîchissement des données API..."):
-                st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers)
+                st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
                 st.session_state.ev_data_105 = {
-                    "ACHAT": fetch_evoliz_data("purchase-classifications", headers),
-                    "VENTE": fetch_evoliz_data("sale-classifications", headers),
-                    "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", headers),
-                    "SORTIE BQ": fetch_evoliz_data("purchase-affectations", headers),
+                    "ACHAT": fetch_evoliz_data("purchase-classifications", headers, company_id=cid),
+                    "VENTE": fetch_evoliz_data("sale-classifications", headers, company_id=cid),
+                    "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", headers, company_id=cid),
+                    "SORTIE BQ": fetch_evoliz_data("purchase-affectations", headers, company_id=cid),
                 }
 
         if st.session_state.sync_log:
