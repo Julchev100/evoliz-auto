@@ -1677,16 +1677,37 @@ def _make_wb(headers):
 def _wb_bytes(wb):
     buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf.getvalue()
 
-def _read_meg(f):
+def _read_meg(f, sheet_name=0):
     for engine in [None, "openpyxl", "xlrd"]:
         try:
-            f.seek(0); return pd.read_excel(f, header=0, engine=engine)
+            f.seek(0); return pd.read_excel(f, header=0, engine=engine, sheet_name=sheet_name)
         except Exception: pass
     try:
         f.seek(0); dfs = pd.read_html(f.read(), header=0)
         if dfs: return dfs[0]
     except Exception: pass
     raise ValueError("Impossible de lire ce fichier.")
+
+def _get_sheet_names(f):
+    """Retourne la liste des onglets d'un fichier Excel, ou None si CSV/HTML."""
+    if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
+        return None
+    for engine in [None, "openpyxl", "xlrd"]:
+        try:
+            f.seek(0)
+            xl = pd.ExcelFile(f, engine=engine)
+            return xl.sheet_names
+        except Exception:
+            pass
+    return None
+
+def _sheet_selector(f, label, key):
+    """Si le fichier a plusieurs onglets, affiche un selectbox et retourne le nom choisi.
+    Si un seul onglet ou CSV, retourne 0 (premier onglet par défaut)."""
+    sheets = _get_sheet_names(f)
+    if sheets and len(sheets) > 1:
+        return st.selectbox(f"📑 Onglet à utiliser ({label})", sheets, key=key)
+    return 0
 
 def _safe_float(v):
     try: return float(v)
@@ -1901,7 +1922,8 @@ with m_cli:
                 st.error("Impossible de lire ce fichier CSV. Verifiez l'encodage.")
                 f_meg_cli = None
         else:
-            df_src = _read_meg(f_meg_cli)
+            _cli_sheet = _sheet_selector(f_meg_cli, "Clients", "sheet_cli")
+            df_src = _read_meg(f_meg_cli, sheet_name=_cli_sheet)
 
         st.caption(f"Fichier lu : **{len(df_src)} lignes**, **{len(df_src.columns)} colonnes**")
 
@@ -2552,7 +2574,8 @@ with m_four:
                 st.error("Impossible de lire ce fichier CSV.")
                 f_meg_four = None
         else:
-            df_four = _read_meg(f_meg_four)
+            _four_sheet = _sheet_selector(f_meg_four, "Fournisseurs", "sheet_four")
+            df_four = _read_meg(f_meg_four, sheet_name=_four_sheet)
 
         if f_meg_four and df_four is not None:
             st.caption(f"Fichier lu : **{len(df_four)} lignes**, **{len(df_four.columns)} colonnes**")
