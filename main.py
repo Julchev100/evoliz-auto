@@ -271,11 +271,6 @@ with st.sidebar:
             _f_param_sb = st.file_uploader("Importer un fichier parametres", type=["xlsm", "xlsx", "xls"], key="imp_param_sb", label_visibility="collapsed")
             if _f_param_sb: st.session_state["imp_file_param"] = _f_param_sb
             show_param = st.checkbox("Voir / éditer les paramètres", value=False, key="show_param")
-            if show_param:
-                # Élargir la sidebar pour voir le tableau confortablement
-                st.markdown("""<style>
-                    [data-testid="stSidebar"] { min-width: 600px; max-width: 800px; }
-                </style>""", unsafe_allow_html=True)
             if show_param and not st.session_state.nr_v62.empty:
                 _edited_sb = st.data_editor(
                     st.session_state.nr_v62, num_rows="dynamic", use_container_width=True, key="param_editor_sb"
@@ -296,6 +291,12 @@ with st.sidebar:
         show_param = False
         fusion_tva = True
         tva_achat_rate = 20.0
+
+# Élargir la sidebar quand on édite les paramètres comptables
+if show_param:
+    st.markdown("""<style>
+        [data-testid="stSidebar"] { min-width: 600px; max-width: 800px; }
+    </style>""", unsafe_allow_html=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDS_PATH = os.path.join(APP_DIR, ".evoliz_creds.json")
