@@ -2257,12 +2257,11 @@ with m_cli:
     # --- Etape 2 : Consolidation fichier (+ Evoliz si connecté) ---
     has_api = bool(st.session_state.get("token_headers_105"))
     if f_meg_cli:
-        # L'ID inclut le mapping pour re-consolider automatiquement quand il change
-        _mapping_sig = str(sorted(mapping.items())) if mapping else ""
-        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size) + _mapping_sig
-        _file_changed = st.session_state.get("meg_consol_file_id") != _cli_file_id
+        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size)
         _no_data = st.session_state.get("meg_df_clients") is None
-        _auto_run = _file_changed or _no_data
+        _new_file = st.session_state.get("meg_consol_file_id") != _cli_file_id
+        # Auto-consolidation uniquement au 1er chargement d'un nouveau fichier
+        _auto_run = _no_data or _new_file
         _manual_run = st.button("🔄 Re-consolider" + (" avec Evoliz" if has_api else ""), use_container_width=True, key="btn_consolider")
         if _auto_run or _manual_run:
             st.session_state["meg_consol_file_id"] = _cli_file_id
