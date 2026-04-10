@@ -3012,27 +3012,22 @@ with m_cli:
                         st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
                         st.rerun()
 
-                if st.button("💾 Appliquer les corrections", use_container_width=True, key="btn_apply_missing"):
-                    _applied = 0
-                    for _i, _er in enumerate(_edit_rows):
-                        _orig_idx = _er["_idx"]
-                        for col, api_field in _required_api.items():
-                            _col_clean = col.replace(" *", "")
-                            if _col_clean in _edited_missing.columns:
-                                _new_val = str(_edited_missing.at[_i, _col_clean]).strip()
-                                if _new_val and _new_val not in ("NC", "nan", ""):
-                                    if col in df_preview_c.columns:
-                                        _old_val = to_clean_str(df_preview_c.at[_orig_idx, col])
-                                        if _new_val != _old_val:
-                                            df_preview_c.at[_orig_idx, col] = _new_val
-                                            _applied += 1
-                    if _applied:
-                        st.session_state["meg_df_clients"] = df_preview_c
-                        st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
-                        st.success(f"{_applied} correction(s) appliquée(s)")
-                        st.rerun()
-                    else:
-                        st.info("Aucune correction détectée.")
+                # Persistance automatique des modifications (sans bouton)
+                _applied = 0
+                for _i, _er in enumerate(_edit_rows):
+                    _orig_idx = _er["_idx"]
+                    for col, api_field in _required_api.items():
+                        _col_clean = col.replace(" *", "")
+                        if _col_clean in _edited_missing.columns:
+                            _new_val = str(_edited_missing.at[_i, _col_clean]).strip()
+                            if _new_val and _new_val not in ("NC", "nan", ""):
+                                if col in df_preview_c.columns:
+                                    _old_val = to_clean_str(df_preview_c.at[_orig_idx, col])
+                                    if _new_val != _old_val:
+                                        df_preview_c.at[_orig_idx, col] = _new_val
+                                        _applied += 1
+                if _applied:
+                    st.session_state["meg_df_clients"] = df_preview_c
         else:
             st.success("✅ Tous les clients ont les champs obligatoires remplis — prêts pour l'injection.")
 
