@@ -703,7 +703,10 @@ with m_import:
             sheet_idx = sheets.index(sheet_bal)
             df_bal_preview = st.session_state._bal_html_fallback[sheet_idx]
         else:
-            sheet_bal = st.selectbox("Onglet Balance", xl.sheet_names)
+            if len(xl.sheet_names) > 1:
+                sheet_bal = st.selectbox("Onglet Balance", xl.sheet_names)
+            else:
+                sheet_bal = xl.sheet_names[0]
             # Lecture via l'objet ExcelFile déjà ouvert (évite de ré-ouvrir le fichier)
             df_bal_preview = xl.parse(sheet_name=sheet_bal)
         cols_preview = df_bal_preview.columns.tolist()
@@ -1692,7 +1695,15 @@ def _get_sheet_names(f):
     """Retourne la liste des onglets d'un fichier Excel, ou None si CSV/HTML."""
     if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
         return None
-    for engine in [None, "openpyxl", "xlrd"]:
+    # Choisir le bon engine selon l'extension
+    fname = getattr(f, 'name', '').lower()
+    if fname.endswith('.xls'):
+        engines = ["xlrd", None]
+    elif fname.endswith(('.xlsx', '.xlsm')):
+        engines = ["openpyxl", None]
+    else:
+        engines = [None, "openpyxl", "xlrd"]
+    for engine in engines:
         try:
             f.seek(0)
             xl = pd.ExcelFile(f, engine=engine)
