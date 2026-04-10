@@ -468,6 +468,8 @@ with m2:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
+                # WARNING: Le token Evoliz expire au bout de 20 minutes.
+                # Si vous obtenez des erreurs 401, reconnectez-vous via le bouton "Déconnexion".
                 # Découverte des dossiers accessibles (paginé)
                 _companies = []
                 _co_error = None
