@@ -2447,11 +2447,20 @@ with m_cli:
 
         st.subheader(f"👥 {len(df_preview_c)} client(s) consolides")
 
+        # Colonnes éditables : Siren + checkbox enrichissement
+        _editable_cols = []
+        if "Siren" in df_show.columns:
+            _editable_cols.append("Siren")
+        _disabled_cols = [c for c in df_show.columns if c not in _editable_cols and c != "✅"]
+
         if has_enriched:
-            st.caption("🟢 = enrichi Sirene. Decochez ✅ pour garder les donnees d'origine.")
+            st.caption("🟢 = enrichi Sirene. Decochez ✅ pour garder les donnees d'origine. Modifiez le Siren pour relancer la recherche.")
+            _col_config = {"✅": st.column_config.CheckboxColumn("✅", default=True, width="small")}
+            if "Siren" in df_show.columns:
+                _col_config["Siren"] = st.column_config.TextColumn("Siren", width="medium")
             edited = st.data_editor(df_show, use_container_width=True, hide_index=True,
-                disabled=[c for c in df_show.columns if c != "✅"],
-                column_config={"✅": st.column_config.CheckboxColumn("✅", default=True, width="small")},
+                disabled=_disabled_cols,
+                column_config=_col_config,
                 key=f"meg_enrichir_editor_{st.session_state.get('meg_editor_ver', 0)}")
             if "✅" in edited.columns:
                 for i in edited.index:
@@ -2459,14 +2468,62 @@ with m_cli:
                     if v is not None: enrichir_flags[i] = bool(v)
                 st.session_state["meg_enrichir_flags"] = enrichir_flags
         else:
-            def _color_source(row):
-                src = str(row.get("Source", ""))
-                if "Nouveau" in src: return ["background-color: #d4edda"] * len(row)
-                if "Doublon" in src: return ["background-color: #fff3cd"] * len(row)
-                if "Evoliz seul" in src: return ["background-color: #e8f4fd"] * len(row)
-                return [""] * len(row)
-            st.dataframe(df_show.style.apply(_color_source, axis=1), use_container_width=True, hide_index=True)
-            st.caption("🟢 Vert = Nouveau | 🟡 Jaune = Doublon | 🔵 Bleu = Evoliz seul")
+            _col_config = {}
+            if "Siren" in df_show.columns:
+                _col_config["Siren"] = st.column_config.TextColumn("Siren", width="medium")
+            st.caption("Modifiez le Siren pour relancer la recherche sur ce numéro.")
+            edited = st.data_editor(df_show, use_container_width=True, hide_index=True,
+                disabled=_disabled_cols,
+                column_config=_col_config,
+                key=f"meg_editor_siren_{st.session_state.get('meg_editor_ver', 0)}")
+
+        # Détecter les SIREN modifiés et relancer la recherche
+        if "Siren" in df_show.columns and "Siren" in edited.columns:
+            _siren_changed = []
+            for i in edited.index:
+                _old = str(df_show.at[i, "Siren"]).replace("🟢 ", "").strip() if i in df_show.index else ""
+                _new = str(edited.at[i, "Siren"]).strip()
+                if _new != _old and _new and len(_new) >= 9 and _new.isdigit():
+                    _siren_changed.append((i, _new))
+            if _siren_changed:
+                with st.spinner(f"Recherche Sirene pour {len(_siren_changed)} SIREN modifié(s)..."):
+                    df_e = df_preview_c.copy()
+                    new_sc = set(sirene_cells); new_si = dict(sirene_info)
+                    for idx, siren_val in _siren_changed:
+                        try:
+                            r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                             params={"q": siren_val, "per_page": 1, "page": 1}, timeout=10)
+                            if r.status_code != 200: continue
+                            results = r.json().get("results", [])
+                            if not results: st.warning(f"SIREN {siren_val} : aucun résultat"); continue
+                            ent = results[0]; siege = ent.get("siege", {})
+                            siren = ent.get("siren", ""); siret = siege.get("siret", "")
+                            nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale", ""))
+                            new_si[idx] = {"nom": nom_t, "activite": _naf_label(siege.get("activite_principale", "")),
+                                           "ville": siege.get("libelle_commune", "")}
+                            def _upd(col, val):
+                                if col in df_e.columns and val:
+                                    df_e.at[idx, col] = val; new_sc.add((idx, col))
+                            _upd("Siren", siren); _upd("Siret", siret)
+                            if siren and "Type *" in df_e.columns:
+                                df_e.at[idx, "Type *"] = "Professionnel"; new_sc.add((idx, "Type *"))
+                            _upd("APE / NAF", ent.get("activite_principale", ""))
+                            _upd("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
+                            if siren and "TVA intracommunautaire" in df_e.columns:
+                                tv = f"FR{(12 + 3 * (int(siren) % 97)) % 97:02d}{siren}"
+                                _upd("TVA intracommunautaire", tv)
+                            pts = [siege.get("numero_voie", ""), siege.get("type_voie", ""), siege.get("libelle_voie", "")]
+                            _upd("Adresse", " ".join(p for p in pts if p))
+                            _upd("Code postal *", siege.get("code_postal", ""))
+                            _upd("Ville *", siege.get("libelle_commune", ""))
+                            st.success(f"SIREN {siren_val} → **{nom_t}** ({siege.get('libelle_commune', '')})")
+                        except Exception as exc:
+                            st.error(f"SIREN {siren_val} : {exc}")
+                    st.session_state["meg_df_clients"] = df_e
+                    st.session_state["meg_sirene_cells"] = new_sc
+                    st.session_state["meg_sirene_info"] = new_si
+                    st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                    st.rerun()
 
         # --- CR enrichissement ---
         if st.session_state.get("meg_sirene_stats"):
