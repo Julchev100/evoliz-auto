@@ -36,32 +36,35 @@ def clean_label_tva(label, code, do_fusion=True):
     if do_fusion and str(code).startswith(('2', '6', '7')):
         s = str(label)
         # 1. Supprimer les taux de TVA (20%, 5,5 %, 10.0%, etc.) avec les signes autour
-        s = re.sub(r'[\s\-/\(]*\d+[\.,]?\d*\s?%[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
-        # 2. Supprimer les mentions TVA et variantes :
-        #    TVA, EXONERE, EXO, EXOTVA, INTRA, INTRACOM, INTRACOMMUNAUTAIRE, IC,
-        #    AUTOLIQUIDATION, AUTOLIQ, REVERSE CHARGE, NON SOUMIS, HORS TAXE, HT
+        s = re.sub(r'[\s\-/\(]*\d+[.,\s]?\d*\s?%[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
+        # 2. Supprimer les mentions TVA et toutes leurs variantes, y compris
+        #    tronquées (EXO, INTR, AUTOLIQ...) grâce à des préfixes minimaux.
+        #    Le \w* après le préfixe attrape les suffixes quelconques.
         s = re.sub(
             r'[\s\-/\(]*\b('
-            r'TVA'
-            r'|EXON[ÉEée]R[ÉEée][EeSs]?'
-            r'|EXO\s*TVA'
-            r'|EXO'
-            r'|INTRA\s*COM(?:MUNAUTAIRE)?'
-            r'|INTRA'
-            r'|I\.?C\.?'
-            r'|AUTOLIQ(?:UIDATION)?'
-            r'|AUTO[\-\s]?LIQ(?:UIDATION)?'
-            r'|REVERSE\s*CHARGE'
-            r'|NON\s*SOUMIS(?:E)?'
-            r'|HORS\s*TAXE'
-            r'|HT'
-            r'|IMPORT'
-            r'|UE'
-            r'|CEE'
+            r'T[\.\s]?V[\.\s]?A\.?'                   # TVA, T.V.A., T V A
+            r'|EXON\w*'                              # EXONERE, EXONEREE, EXONERATION...
+            r'|EXO\w*'                               # EXO, EXOTVA, EXO TVA...
+            r'|INTRA\w*'                             # INTRA, INTRACOM, INTRACOMMUNAUTAIRE...
+            r'|I[\.\s]?C\.?\w*'                        # IC, I.C., I C, I.C
+            r'|AUTO[\-\s.]?LIQ\w*'                   # AUTOLIQ, AUTOLIQUIDATION, AUTO-LIQ...
+            r'|REVERSE[\s\-]?CHARGE\w*'              # REVERSE CHARGE
+            r'|NON[\s\-]?SOUMIS\w*'                  # NON SOUMIS, NON-SOUMISE
+            r'|HORS[\s\-]?TAXE\w*'                   # HORS TAXE, HORS-TAXE
+            r'|IMPORT\w*'                             # IMPORT, IMPORTATION
+            r'|EXPORT\w*'                             # EXPORT, EXPORTATION
+            r'|FRANCE'                                # FRANCE
+            r'|FR'                                    # FR
+            r'|UE'                                    # UE
+            r'|CEE'                                   # CEE
+            r'|HT'                                    # HT
+            r'|TTC'                                   # TTC
             r')\b[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
-        # 3. Supprimer les mots résiduels type EX... en fin de chaîne
+        # 3. Normaliser la ponctuation résiduelle (. , ; :) en espaces
+        s = re.sub(r'[.,;:]+', ' ', s)
+        # 4. Supprimer les mots résiduels type EX... en fin de chaîne
         s = re.sub(r'[\s\-/]*\bEX\w*\s*$', '', s, flags=re.IGNORECASE)
-        # 4. Nettoyer les signes orphelins en début/fin et les espaces multiples
+        # 5. Nettoyer les signes orphelins en début/fin et les espaces multiples
         s = re.sub(r'^[\s\-/\(\)]+|[\s\-/\(\)]+$', '', s)
         return " ".join(s.split()).upper()
     return str(label).strip().upper()
