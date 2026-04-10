@@ -1106,47 +1106,94 @@ with m6:
             })
         st.table(pd.DataFrame(stats))
 
-        # --- Visualisation détaillée des classifications et affectations Evoliz ---
+        # --- Visualisation par catégorie : existants + à créer (avec possibilité de désactiver) ---
         st.divider()
-        st.subheader("🔍 Détail des catégories Evoliz (données API)")
+        st.subheader("🔍 Détail par catégorie")
 
-        # Comptes comptables
-        with st.expander(f"📖 Comptes comptables ({len(st.session_state.ev_acc_105)})", expanded=False):
-            if st.session_state.ev_acc_105:
-                _acc_rows = []
+        # Init session state pour les créations désactivées
+        if "_skip_create" not in st.session_state:
+            st.session_state._skip_create = set()  # ensemble de (cat, code) à ne pas créer
+
+        _cat_labels = {
+            "COMPTE": "📖 Comptes comptables",
+            "ACHAT": "📥 Classifications achat",
+            "VENTE": "📤 Classifications vente",
+            "ENTRÉE BQ": "📤 Affectations entrées bancaires",
+            "SORTIE BQ": "📥 Affectations sorties bancaires",
+        }
+        for _cat, _cat_label in _cat_labels.items():
+            # Existants dans Evoliz
+            if _cat == "COMPTE":
+                _existing = []
                 _seen_ids = set()
-                for _k, _v in st.session_state.ev_acc_105.items():
+                for _v in st.session_state.ev_acc_105.values():
                     if _v['id'] in _seen_ids: continue
                     _seen_ids.add(_v['id'])
-                    _acc_rows.append({"Code": _v.get('code', ''), "Libellé": _v.get('label', ''), "ID": _v['id']})
-                _acc_rows.sort(key=lambda x: x["Code"])
-                st.dataframe(pd.DataFrame(_acc_rows), use_container_width=True, hide_index=True)
+                    _existing.append({"Code": _v.get('code', ''), "Libellé": _v.get('label', '')})
             else:
-                st.caption("Aucun compte chargé.")
+                _flux_data = st.session_state.ev_data_105.get(_cat, {})
+                _seen_ids = set()
+                _existing = []
+                for _v in _flux_data.values():
+                    if _v['id'] in _seen_ids: continue
+                    _seen_ids.add(_v['id'])
+                    _existing.append({"Code": _v.get('code', ''), "Libellé": _v.get('label', ''), "Compte": _v.get('acc_id', '')})
 
-        # Classifications et affectations par flux
-        for _flux_name, _flux_label in [("ACHAT", "Classifications achat"), ("VENTE", "Classifications vente"),
-                                         ("ENTRÉE BQ", "Affectations entrées bancaires"), ("SORTIE BQ", "Affectations sorties bancaires")]:
-            _flux_data = st.session_state.ev_data_105.get(_flux_name, {})
-            _unique = {}
-            for _v in _flux_data.values():
-                if _v['id'] not in _unique:
-                    _unique[_v['id']] = _v
-            with st.expander(f"{'📥' if 'ACHAT' in _flux_name or 'SORTIE' in _flux_name else '📤'} {_flux_label} ({len(_unique)})", expanded=False):
-                if _unique:
-                    _rows = []
-                    for _v in _unique.values():
-                        _rows.append({
-                            "Code": _v.get('code', ''),
-                            "Libellé": _v.get('label', ''),
-                            "Compte": _v.get('acc_id', ''),
-                            "TVA": _v.get('vat_id', '') or '',
-                            "ID": _v['id'],
-                        })
-                    _rows.sort(key=lambda x: x["Code"])
-                    st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
-                else:
-                    st.caption(f"Aucune {_flux_label.lower()} chargée.")
+            # À créer (➕) depuis la matrice
+            _to_create = []
+            for _idx, _row in df_m.iterrows():
+                if _row.get(_cat) == '➕':
+                    _code = _row.get('N°', '')
+                    _label = _row.get('LibFlux', _row.get('Libellé', ''))
+                    _key = (_cat, _code, _label)
+                    _to_create.append({"Code": _code, "Libellé": _label, "_key": _key, "_idx": _idx})
+
+            # À mettre à jour (🔄) depuis la matrice
+            _to_update = []
+            for _idx, _row in df_m.iterrows():
+                if _row.get(_cat) == '🔄':
+                    _to_update.append({"Code": _row.get('N°', ''), "Libellé": _row.get('LibFlux', _row.get('Libellé', ''))})
+
+            _n_exist = len(_existing)
+            _n_create = len(_to_create)
+            _n_update = len(_to_update)
+            _summary = f"{_n_exist} existant(s)"
+            if _n_create: _summary += f", {_n_create} à créer"
+            if _n_update: _summary += f", {_n_update} à MAJ"
+
+            with st.expander(f"{_cat_label} — {_summary}", expanded=False):
+                # Existants
+                if _existing:
+                    st.caption(f"✅ **{_n_exist} existant(s) dans Evoliz**")
+                    st.dataframe(pd.DataFrame(_existing).sort_values("Code"), use_container_width=True, hide_index=True)
+
+                # MAJ
+                if _to_update:
+                    st.caption(f"🔄 **{_n_update} à mettre à jour**")
+                    st.dataframe(pd.DataFrame(_to_update).sort_values("Code"), use_container_width=True, hide_index=True)
+
+                # Créations avec cases à cocher
+                if _to_create:
+                    st.caption(f"➕ **{_n_create} à créer** — décochez pour désactiver la création")
+                    for _item in _to_create:
+                        _checked = _item["_key"] not in st.session_state._skip_create
+                        _cb = st.checkbox(
+                            f"`{_item['Code']}` — {_item['Libellé']}",
+                            value=_checked,
+                            key=f"cb_create_{_cat}_{_item['_idx']}",
+                        )
+                        if not _cb and _item["_key"] not in st.session_state._skip_create:
+                            st.session_state._skip_create.add(_item["_key"])
+                        elif _cb and _item["_key"] in st.session_state._skip_create:
+                            st.session_state._skip_create.discard(_item["_key"])
+
+                if not _existing and not _to_create and not _to_update:
+                    st.caption("Aucune donnée.")
+
+        # Résumé des créations désactivées
+        _n_skipped = len(st.session_state._skip_create)
+        if _n_skipped:
+            st.warning(f"⚠️ {_n_skipped} création(s) désactivée(s). Ces éléments ne seront pas injectés lors de la synchro.")
 
     else:
         st.info("Lancez l'analyse d'abord (onglet Balance)")
@@ -1170,12 +1217,22 @@ with m7:
         new_accounts = to_sync[to_sync['COMPTE'] == '➕']
         patch_accounts = to_sync[to_sync['COMPTE'] == '🔄']
         if ventes_only:
-            # Flux : ne garder que VENTE
             new_flux = {f: (to_sync[to_sync[f] == '➕'] if f == "VENTE" else pd.DataFrame()) for f in FLUX_ENDPOINTS}
             patch_flux = {f: (to_sync[to_sync[f] == '🔄'] if f == "VENTE" else pd.DataFrame()) for f in FLUX_ENDPOINTS}
         else:
             new_flux = {f: to_sync[to_sync[f] == '➕'] for f in FLUX_ENDPOINTS}
             patch_flux = {f: to_sync[to_sync[f] == '🔄'] for f in FLUX_ENDPOINTS}
+
+        # Filtrer les créations désactivées par l'utilisateur dans la Synthèse
+        _skip = st.session_state.get("_skip_create", set())
+        if _skip:
+            new_accounts = new_accounts[~new_accounts.apply(
+                lambda r: ("COMPTE", r['N°'], r.get('LibFlux', r.get('Libellé', ''))) in _skip, axis=1)]
+            for _f in new_flux:
+                if not new_flux[_f].empty:
+                    new_flux[_f] = new_flux[_f][~new_flux[_f].apply(
+                        lambda r, _cat=_f: (_cat, r['N°'], r.get('LibFlux', r.get('Libellé', ''))) in _skip, axis=1)]
+
         total_create = len(new_accounts) + sum(len(v) for v in new_flux.values())
         total_patch = len(patch_accounts) + sum(len(v) for v in patch_flux.values())
 
