@@ -1081,12 +1081,10 @@ with m4:
 
             # Init des exclusions de suppression
             if "_skip_delete" not in st.session_state:
-                st.session_state._skip_delete = set()  # ensemble de (cat, id) à ne PAS supprimer
+                st.session_state._skip_delete = set()
 
             total_orphans = sum(len(v) for v in orphans_by_cat.values())
-            _n_skipped_del = len(st.session_state._skip_delete)
-            _n_effective = total_orphans - _n_skipped_del
-            st.subheader(f"🧹 {total_orphans} éléments orphelins ({_n_effective} à supprimer)")
+            st.subheader(f"🧹 {total_orphans} éléments orphelins")
 
             for cat, items in orphans_by_cat.items():
                 if items:
@@ -1103,14 +1101,18 @@ with m4:
                             else:
                                 st.session_state._skip_delete.discard(_key)
 
-            # Filtrer les eraz_items pour ne garder que ceux non exclus
+            # Compter APRÈS les checkboxes pour avoir l'état à jour
             _filtered_eraz = {}
             for cat, items in orphans_by_cat.items():
                 _filtered_eraz[cat] = [it for it in items if (cat, it['id']) not in st.session_state._skip_delete]
             st.session_state.eraz_items = _filtered_eraz
 
-            if _n_skipped_del:
-                st.info(f"⏭️ {_n_skipped_del} élément(s) exclus de la suppression.")
+            _n_effective = sum(len(v) for v in _filtered_eraz.values())
+            _n_skipped = total_orphans - _n_effective
+            if _n_skipped:
+                st.info(f"⏭️ {_n_skipped} élément(s) exclus — **{_n_effective}** suppression(s) effectives.")
+            else:
+                st.success(f"✅ {_n_effective} suppression(s) prévues.")
 
             if not total_orphans:
                 st.success("Aucun orphelin détecté")
