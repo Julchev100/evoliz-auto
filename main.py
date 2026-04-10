@@ -2948,11 +2948,82 @@ with m_cli:
                         applied += 1
                         st.rerun()
 
-        # --- Etape 4 : Injection ---
+        # --- Etape 4 : Vérification des champs obligatoires manquants ---
         sirene_cells_per_row = {r for (r,_) in sirene_cells}
         st.divider()
+        st.subheader("⚠️ Vérification avant injection")
+
+        # Champs requis par l'API Evoliz pour créer un client
+        _required_api = {"Societe / Nom *": "name", "Code *": "code", "Type *": "type",
+                         "Code postal *": "postcode", "Ville *": "town", "Code pays (ISO 2) *": "iso2"}
+        _missing_rows = []
+        for idx, row in df_preview_c.iterrows():
+            _manques = []
+            for col, api_field in _required_api.items():
+                if col in df_preview_c.columns:
+                    val = to_clean_str(row[col])
+                    if not val or val in ("NC", "nan"):
+                        _manques.append(col.replace(" *", ""))
+                else:
+                    _manques.append(col.replace(" *", ""))
+            if _manques:
+                _nom = to_clean_str(row.get("Societe / Nom *", "")) if "Societe / Nom *" in df_preview_c.columns else ""
+                _code = to_clean_str(row.get("Code *", "")) if "Code *" in df_preview_c.columns else ""
+                _missing_rows.append({"idx": idx, "Code": _code, "Nom": _nom, "Champs manquants": ", ".join(_manques)})
+
+        if _missing_rows:
+            st.warning(f"⚠️ {len(_missing_rows)} client(s) ont des champs obligatoires manquants — l'injection échouera pour ces lignes.")
+            with st.expander(f"📋 {len(_missing_rows)} client(s) incomplets — cliquez pour éditer", expanded=True):
+                _df_missing = pd.DataFrame(_missing_rows)
+                # Construire un tableau éditable avec les champs manquants
+                _edit_rows = []
+                for mr in _missing_rows:
+                    _row_data = {"Code": mr["Code"], "Nom": mr["Nom"]}
+                    _src_row = df_preview_c.loc[mr["idx"]]
+                    for col in _required_api:
+                        _col_clean = col.replace(" *", "")
+                        _row_data[_col_clean] = to_clean_str(_src_row[col]) if col in df_preview_c.columns else ""
+                    _row_data["_idx"] = mr["idx"]
+                    _edit_rows.append(_row_data)
+                _df_edit = pd.DataFrame(_edit_rows)
+                _edit_cols = [c for c in _df_edit.columns if c not in ("_idx", "Code", "Nom")]
+                _disabled_edit = [c for c in _df_edit.columns if c in ("_idx", "Code", "Nom")]
+                _col_cfg = {}
+                if "Type" in _df_edit.columns:
+                    _col_cfg["Type"] = st.column_config.SelectboxColumn("Type", options=["Particulier", "Professionnel", "Administration publique"])
+                _edited_missing = st.data_editor(
+                    _df_edit.drop(columns=["_idx"]), use_container_width=True, hide_index=True,
+                    disabled=["Code", "Nom"], column_config=_col_cfg,
+                    key=f"edit_missing_{st.session_state.get('meg_editor_ver', 0)}")
+
+                if st.button("💾 Appliquer les corrections", use_container_width=True, key="btn_apply_missing"):
+                    _applied = 0
+                    for _i, _er in enumerate(_edit_rows):
+                        _orig_idx = _er["_idx"]
+                        for col, api_field in _required_api.items():
+                            _col_clean = col.replace(" *", "")
+                            if _col_clean in _edited_missing.columns:
+                                _new_val = str(_edited_missing.at[_i, _col_clean]).strip()
+                                if _new_val and _new_val not in ("NC", "nan", ""):
+                                    if col in df_preview_c.columns:
+                                        _old_val = to_clean_str(df_preview_c.at[_orig_idx, col])
+                                        if _new_val != _old_val:
+                                            df_preview_c.at[_orig_idx, col] = _new_val
+                                            _applied += 1
+                    if _applied:
+                        st.session_state["meg_df_clients"] = df_preview_c
+                        st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                        st.success(f"{_applied} correction(s) appliquée(s)")
+                        st.rerun()
+                    else:
+                        st.info("Aucune correction détectée.")
+        else:
+            st.success("✅ Tous les clients ont les champs obligatoires remplis — prêts pour l'injection.")
+
+        # --- Injection ---
+        st.divider()
         st.subheader(f"🚀 Injection {_entity_label} dans Evoliz")
-        inject_btn = st.button(f"🚀 Injecter les {_entity_label}", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api)
+        inject_btn = st.button(f"🚀 Injecter les {_entity_label}", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api or bool(_missing_rows))
         if inject_btn and has_api:
             headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
             url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}" if cid else f"https://www.evoliz.io/api/v1/{_entity_api}"
