@@ -2449,7 +2449,16 @@ with m_cli:
             df_show.insert(2, "🟢 Nom trouve", df_show.index.map(lambda i: f"🟢 {v}" if (v := sirene_info.get(i, {}).get("nom", "")) else ""))
             df_show.insert(3, "🟢 APE trouve", df_show.index.map(lambda i: f"🟢 {v}" if (v := sirene_info.get(i, {}).get("activite", "")) else ""))
 
-        st.subheader(f"👥 {len(df_preview_c)} client(s) consolides")
+        # Filtre : tous / non enrichis uniquement
+        _n_non_enrichis = len([i for i in df_show.index if i not in sirene_info])
+        _filter_mode = st.radio(
+            f"Afficher", [f"Tous ({len(df_show)})", f"Non enrichis uniquement ({_n_non_enrichis})"],
+            horizontal=True, key="filter_enrichi")
+        if "Non enrichis" in _filter_mode:
+            _non_enrichi_idx = [i for i in df_show.index if i not in sirene_info]
+            df_show = df_show.loc[_non_enrichi_idx]
+
+        st.subheader(f"👥 {len(df_show)} client(s) affichés")
 
         # Colonnes éditables : Siren, Type
         _editable_cols = []
