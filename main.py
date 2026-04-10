@@ -2599,8 +2599,11 @@ with m_cli:
                 st.session_state["meg_sirene_cells"] = new_sc
                 st.session_state["meg_sirene_info"] = new_si
                 st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
-                st.success(f"2ème lame terminée : {_ok} enrichi(s), {_ko} non trouvé(s)")
+                st.session_state["_2eme_lame_result"] = f"2ème lame terminée : {_ok} enrichi(s), {_ko} non trouvé(s)"
                 st.rerun()
+            # Afficher le résultat persistant
+            if st.session_state.get("_2eme_lame_result"):
+                st.success(st.session_state["_2eme_lame_result"])
 
         # --- Enrichissement SIRENE (1ère lame — par nom) ---
         st.divider()
