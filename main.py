@@ -266,10 +266,6 @@ with st.sidebar:
     mod_fournisseurs = st.checkbox("🏭 Injection Fournisseurs", value=True, key="mod_fournisseurs")
     mod_articles = st.checkbox("📦 Articles", value=True, key="mod_articles")
     mod_factures = st.checkbox("🧾 Factures & Avoirs", value=scope == "Parametrage complet", key="mod_factures")
-    if mod_clients or mod_fournisseurs:
-        with st.expander("🔑 Token Pappers (enrichissement 3ème lame)", expanded=False):
-            _pappers_token = st.text_input("Token API Pappers", type="password", key="pappers_token",
-                                            help="Gratuit : 100 crédits sur pappers.fr/api")
     if mod_compta:
         with st.expander("📂 Parametres comptables", expanded=False):
             _f_param_sb = st.file_uploader("Importer un fichier parametres", type=["xlsm", "xlsx", "xls"], key="imp_param_sb", label_visibility="collapsed")
@@ -2636,128 +2632,6 @@ with m_cli:
             # Afficher le résultat persistant
             if st.session_state.get("_2eme_lame_result"):
                 st.success(st.session_state["_2eme_lame_result"])
-
-        # --- Enrichissement 3ème lame : Pappers (pour les non enrichis) ---
-        _pappers_tok = st.session_state.get("pappers_token", "")
-        _non_enrichis_noms = []
-        if "Societe / Nom *" in df_preview_c.columns:
-            for i in df_preview_c.index:
-                if i not in sirene_info:
-                    _nom = str(df_preview_c.at[i, "Societe / Nom *"]).strip()
-                    if _nom and _nom != "nan":
-                        _non_enrichis_noms.append((i, _nom))
-        if _pappers_tok and _non_enrichis_noms:
-            st.divider()
-            st.subheader(f"🔍 3ème lame Pappers — {len(_non_enrichis_noms)} client(s) non enrichi(s)")
-            if st.button(f"🔍 Rechercher sur Pappers ({len(_non_enrichis_noms)} clients)", type="primary", use_container_width=True, key="btn_pappers"):
-                df_e = df_preview_c.copy()
-                new_sc = set(sirene_cells); new_si = dict(sirene_info)
-                _p_ok = _p_ko = _p_suggestions = 0
-                _pappers_suggestions = {}
-                progress = st.progress(0, text="Recherche Pappers...")
-
-                def _search_pappers(task):
-                    idx, nom = task
-                    try:
-                        r = requests.get("https://api.pappers.fr/v1/recherche",
-                                         params={"q": nom, "par_page": 5, "page": 1, "api_token": _pappers_tok}, timeout=10)
-                        if r.status_code == 429:
-                            time.sleep(2)
-                            r = requests.get("https://api.pappers.fr/v1/recherche",
-                                             params={"q": nom, "par_page": 5, "page": 1, "api_token": _pappers_tok}, timeout=10)
-                        return (idx, nom, r.status_code, r.json() if r.status_code == 200 else None)
-                    except Exception as exc:
-                        return (idx, nom, -1, str(exc))
-
-                # Parallèle 5 workers
-                _p_results = []
-                with ThreadPoolExecutor(max_workers=5) as pool:
-                    futures = {pool.submit(_search_pappers, t): t for t in _non_enrichis_noms}
-                    for _n, f in enumerate(as_completed(futures)):
-                        _p_results.append(f.result())
-                        progress.progress((_n + 1) / len(_non_enrichis_noms))
-
-                for idx, nom, status, data in _p_results:
-                    if status != 200 or not data:
-                        _p_ko += 1; continue
-                    resultats = data.get("resultats", [])
-                    if not resultats:
-                        _p_ko += 1; continue
-                    best = resultats[0]
-                    best_name = best.get("nom_entreprise", "")
-                    nom_n = norm_piv(nom); best_n = norm_piv(best_name)
-                    auto_match = (nom_n == best_n or nom_n in best_n or best_n in nom_n
-                                  or (len(nom_n) > 3 and len(best_n) > 3 and
-                                      len(set(nom_n) & set(best_n)) / max(len(set(nom_n)), len(set(best_n))) > 0.6))
-                    if auto_match:
-                        # Enrichir automatiquement
-                        siege = best.get("siege", {})
-                        siren = best.get("siren", ""); siret = siege.get("siret", "")
-                        new_si[idx] = {"nom": best_name, "activite": best.get("code_naf", ""), "ville": siege.get("ville", "")}
-                        def _upd3(col, val, _idx=idx):
-                            if col in df_e.columns and val:
-                                df_e.at[_idx, col] = val; new_sc.add((_idx, col))
-                        _upd3("Siren", siren); _upd3("Siret", siret)
-                        if siren and "Type *" in df_e.columns:
-                            _fj = best.get("forme_juridique", "")
-                            _nj = best.get("categorie_juridique", "")
-                            _nj_s = str(_nj).strip()
-                            if _nj_s and _nj_s[:1] in ("7", "1"):
-                                df_e.at[idx, "Type *"] = "Administration publique"; new_sc.add((idx, "Type *"))
-                            elif _nj_s and _nj_s[:1] == "9":
-                                df_e.at[idx, "Type *"] = "Particulier"; new_sc.add((idx, "Type *"))
-                            else:
-                                df_e.at[idx, "Type *"] = "Professionnel"; new_sc.add((idx, "Type *"))
-                        _upd3("APE / NAF", best.get("code_naf", ""))
-                        _upd3("Forme juridique", _normalize_forme_juridique(best.get("categorie_juridique", "")))
-                        if siren and "TVA intracommunautaire" in df_e.columns:
-                            try:
-                                tv = f"FR{(12 + 3 * (int(siren) % 97)) % 97:02d}{siren}"
-                                _upd3("TVA intracommunautaire", tv)
-                            except ValueError: pass
-                        _upd3("Adresse", siege.get("adresse_ligne_1", ""))
-                        _upd3("Code postal *", siege.get("code_postal", ""))
-                        _upd3("Ville *", siege.get("ville", ""))
-                        _p_ok += 1
-                    else:
-                        # Stocker comme suggestions
-                        suggestions = []
-                        for res in resultats[:5]:
-                            rsie = res.get("siege", {})
-                            suggestions.append({
-                                "nom": res.get("nom_entreprise", ""),
-                                "siren": res.get("siren", ""),
-                                "ville": rsie.get("ville", ""),
-                                "activite": res.get("code_naf", ""),
-                                "_raw": res,
-                            })
-                        _pappers_suggestions[idx] = {"client": nom, "suggestions": suggestions}
-                        _p_suggestions += 1
-
-                progress.empty()
-                st.session_state["meg_df_clients"] = df_e
-                st.session_state["meg_sirene_cells"] = new_sc
-                st.session_state["meg_sirene_info"] = new_si
-                st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
-                # Fusionner les suggestions Pappers avec les suggestions Sirene existantes
-                _existing_sugg = st.session_state.get("meg_sirene_suggestions") or {}
-                _existing_sugg.update(_pappers_suggestions)
-                st.session_state["meg_sirene_suggestions"] = _existing_sugg
-                # MAJ stats
-                _prev_stats = st.session_state.get("meg_sirene_stats") or {"enriched": 0, "already_complete": 0, "not_found": 0, "skipped": 0}
-                st.session_state["meg_sirene_stats"] = {
-                    "enriched": _prev_stats["enriched"] + _p_ok,
-                    "already_complete": _prev_stats["already_complete"],
-                    "not_found": max(0, _prev_stats["not_found"] - _p_ok),
-                    "skipped": _prev_stats["skipped"],
-                }
-                st.session_state["_3eme_lame_result"] = f"Pappers : {_p_ok} enrichi(s), {_p_suggestions} suggestion(s), {_p_ko} non trouvé(s)"
-                st.rerun()
-            if st.session_state.get("_3eme_lame_result"):
-                st.success(st.session_state["_3eme_lame_result"])
-        elif not _pappers_tok and _non_enrichis_noms:
-            st.divider()
-            st.caption(f"💡 {len(_non_enrichis_noms)} client(s) non enrichi(s) — ajoutez un token Pappers dans la sidebar pour une recherche complémentaire.")
 
         # --- Enrichissement SIRENE (1ère lame — par nom ou SIREN existant) ---
         st.divider()
