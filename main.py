@@ -1975,8 +1975,11 @@ def _normalize_type(type_val, nom_societe=""):
         for marker in ["MAIRIE", "COMMUNE", "PREFECTURE", "MINISTERE", "LYCEE", "COLLEGE"]:
             if marker in tv:
                 return "Administration publique"
-    # Type vide ou non exploitable -> analyser le nom
-    return _detect_type_from_name(nom_societe)
+    # Type vide ou non exploitable -> ne pas deviner, laisser vide
+    # (sera déterminé par l'enrichissement Sirene via nature_juridique)
+    if nom_societe:
+        return _detect_type_from_name(nom_societe)
+    return ""
 
 def _parse_date(v):
     if isinstance(v, dt_datetime): return v
@@ -2338,7 +2341,12 @@ with m_cli:
                         code = _raw_code
                     else:
                         code = norm_piv(nom)[:15]
-                    type_c = _normalize_type(_get(row, "Type"), nom)
+                    # Type : garder la valeur du fichier si mappée, sinon vide (sera déterminé par l'enrichissement Sirene)
+                    _raw_type = _get(row, "Type")
+                    if _raw_type:
+                        type_c = _normalize_type(_raw_type, "")  # normaliser la valeur fichier sans deviner par le nom
+                    else:
+                        type_c = ""
                     cp = _get(row, "Code postal"); ville = _get(row, "Ville")
                     pays = _get(row, "Pays"); iso2 = _get(row, "Code pays (ISO 2)")
                     adresse = _get(row, "Adresse")
@@ -2574,9 +2582,10 @@ with m_cli:
                 code = str(df_e.at[idx, "Code *"]).strip() if "Code *" in df_e.columns else ""
                 if not nom:
                     skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Vide","Trouve":"","Detail":""}); continue
-                # Skip Particulier UNIQUEMENT si identifié comme tel par le fichier source (pas par défaut)
-                _was_typed_by_file = type_c == "Particulier" and (idx, "Type *") not in sirene_cells
-                if _was_typed_by_file:
+                # Skip Particulier UNIQUEMENT si le fichier source contient une colonne
+                # mappée sur le champ Type ET que cette colonne dit "Particulier"
+                _type_mapped = "Type" in st.session_state.get("meg_col_mapping_final", {})
+                if _type_mapped and type_c == "Particulier":
                     skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Part. (fichier)","Trouve":"","Detail":""}); continue
                 _has_siren = bool(to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else "")
                 _has_siret = bool(to_clean_str(df_e.at[idx, "Siret"]) if "Siret" in df_e.columns else "")
