@@ -2560,8 +2560,135 @@ with m_cli:
                         return [""]*len(row)
                     st.dataframe(df_log.style.apply(_cl, axis=1), use_container_width=True, hide_index=True)
 
-        # --- Enrichissement 2ème lame (SIREN saisis manuellement) ---
-        # Compter les SIREN présents dans le tableau mais pas encore enrichis
+        # --- 2ème lame : propositions Sirene pour les non trouvés ---
+        _non_enrichis = []
+        if "Societe / Nom *" in df_preview_c.columns:
+            for i in df_preview_c.index:
+                if i not in sirene_info:
+                    _nom = str(df_preview_c.at[i, "Societe / Nom *"]).strip()
+                    _code = to_clean_str(df_preview_c.at[i, "Code *"]) if "Code *" in df_preview_c.columns else ""
+                    if _nom and _nom != "nan":
+                        _non_enrichis.append((i, _nom, _code))
+        if _non_enrichis:
+            st.divider()
+            st.subheader(f"🔍 2ème lame — {len(_non_enrichis)} client(s) non identifié(s)")
+            st.caption("Pour chaque client, les 2 résultats Sirene les plus probables sont proposés. Sélectionnez le bon ou ignorez.")
+            if st.button(f"🔍 Rechercher les {len(_non_enrichis)} propositions", type="primary", use_container_width=True, key="btn_2eme_lame"):
+                def _search_2eme(task):
+                    idx, nom, code = task
+                    try:
+                        sq = " ".join(nom.replace("nan","").split()).strip()
+                        if not sq: return (idx, nom, code, [])
+                        r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                         params={"q": sq, "per_page": 2, "page": 1}, timeout=10)
+                        if r.status_code == 429:
+                            time.sleep(2)
+                            r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                             params={"q": sq, "per_page": 2, "page": 1}, timeout=10)
+                        if r.status_code != 200: return (idx, nom, code, [])
+                        results = r.json().get("results", [])
+                        props = []
+                        for res in results[:2]:
+                            rsie = res.get("siege") or {}
+                            props.append({
+                                "nom": res.get("nom_complet", res.get("nom_raison_sociale", "")),
+                                "siren": res.get("siren", ""),
+                                "ville": rsie.get("libelle_commune", ""),
+                                "activite": _naf_label(rsie.get("activite_principale", "")),
+                                "_raw": res,
+                            })
+                        return (idx, nom, code, props)
+                    except Exception:
+                        return (idx, nom, code, [])
+
+                _all_props = []
+                progress = st.progress(0, text="Recherche propositions Sirene...")
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    futures = {pool.submit(_search_2eme, t): t for t in _non_enrichis}
+                    for _n, f in enumerate(as_completed(futures)):
+                        _all_props.append(f.result())
+                        progress.progress((_n + 1) / len(_non_enrichis))
+                progress.empty()
+
+                # Stocker les propositions en session state
+                _props_dict = {}
+                for idx, nom, code, props in _all_props:
+                    if props:
+                        _props_dict[idx] = {"client": nom, "code": code, "propositions": props}
+                st.session_state["_2eme_lame_props"] = _props_dict
+                st.session_state["_2eme_lame_result"] = f"2ème lame : {len(_props_dict)} client(s) avec propositions sur {len(_non_enrichis)} recherché(s)"
+                st.rerun()
+
+            if st.session_state.get("_2eme_lame_result"):
+                st.success(st.session_state["_2eme_lame_result"])
+
+            # Afficher les propositions pour validation
+            _props = st.session_state.get("_2eme_lame_props", {})
+            if _props:
+                st.divider()
+                st.subheader(f"📋 {len(_props)} proposition(s) à valider")
+                _accepted = []
+                for idx, info in sorted(_props.items()):
+                    props = info["propositions"]
+                    options = ["— Ignorer"] + [
+                        f"{p['nom']} | SIREN {p['siren']} | {p['ville']} | {p['activite']}" for p in props
+                    ]
+                    sel = st.selectbox(f"**{info['client']}** ({info['code']})", options, key=f"prop2_{idx}")
+                    if sel != "— Ignorer":
+                        _sel_idx = options.index(sel) - 1
+                        _accepted.append((idx, props[_sel_idx]))
+
+                if _accepted:
+                    if st.button(f"✅ Appliquer {len(_accepted)} sélection(s)", type="primary", use_container_width=True, key="btn_apply_2eme"):
+                        df_e = df_preview_c.copy()
+                        new_sc = set(sirene_cells); new_si = dict(sirene_info)
+                        for idx, prop in _accepted:
+                            ent = prop["_raw"]; siege = ent.get("siege", {})
+                            siren = ent.get("siren", ""); siret = siege.get("siret", "")
+                            nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale", ""))
+                            new_si[idx] = {"nom": nom_t, "activite": _naf_label(siege.get("activite_principale", "")),
+                                           "ville": siege.get("libelle_commune", "")}
+                            def _upd_2l(col, val, _idx=idx):
+                                if col in df_e.columns and val:
+                                    df_e.at[_idx, col] = val; new_sc.add((_idx, col))
+                            _upd_2l("Siren", siren); _upd_2l("Siret", siret)
+                            if siren and "Type *" in df_e.columns:
+                                _nj = str(ent.get("nature_juridique", "")).strip()
+                                if _nj and _nj[:1] in ("7", "1"):
+                                    df_e.at[idx, "Type *"] = "Administration publique"; new_sc.add((idx, "Type *"))
+                                elif _nj and _nj[:1] == "9":
+                                    df_e.at[idx, "Type *"] = "Particulier"; new_sc.add((idx, "Type *"))
+                                else:
+                                    df_e.at[idx, "Type *"] = "Professionnel"; new_sc.add((idx, "Type *"))
+                            _upd_2l("APE / NAF", ent.get("activite_principale", ""))
+                            _upd_2l("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
+                            if siren and "TVA intracommunautaire" in df_e.columns:
+                                try:
+                                    tv = f"FR{(12 + 3 * (int(siren) % 97)) % 97:02d}{siren}"
+                                    _upd_2l("TVA intracommunautaire", tv)
+                                except ValueError: pass
+                            pts = [siege.get("numero_voie", ""), siege.get("type_voie", ""), siege.get("libelle_voie", "")]
+                            _upd_2l("Adresse", " ".join(p for p in pts if p))
+                            _upd_2l("Code postal *", siege.get("code_postal", "")); _upd_2l("Ville *", siege.get("libelle_commune", ""))
+                        st.session_state["meg_df_clients"] = df_e
+                        st.session_state["meg_sirene_cells"] = new_sc
+                        st.session_state["meg_sirene_info"] = new_si
+                        st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver", 0) + 1
+                        # MAJ stats
+                        _prev_stats = st.session_state.get("meg_sirene_stats") or {"enriched": 0, "already_complete": 0, "not_found": 0, "skipped": 0}
+                        st.session_state["meg_sirene_stats"] = {
+                            "enriched": _prev_stats["enriched"] + len(_accepted),
+                            "already_complete": _prev_stats["already_complete"],
+                            "not_found": max(0, _prev_stats["not_found"] - len(_accepted)),
+                            "skipped": _prev_stats["skipped"],
+                        }
+                        # Retirer les props appliquées
+                        for idx, _ in _accepted:
+                            if idx in st.session_state["_2eme_lame_props"]:
+                                del st.session_state["_2eme_lame_props"][idx]
+                        st.rerun()
+
+        # --- 3ème lame (SIREN saisis manuellement) ---
         _siren_a_traiter = []
         if "Siren" in df_preview_c.columns:
             for i in df_preview_c.index:
@@ -2570,9 +2697,9 @@ with m_cli:
                     _siren_a_traiter.append((i, _s))
         if _siren_a_traiter:
             st.divider()
-            st.subheader(f"🔍 Enrichissement 2ème lame — {len(_siren_a_traiter)} SIREN à traiter")
+            st.subheader(f"🔍 3ème lame — {len(_siren_a_traiter)} SIREN saisis à enrichir")
             st.caption("SIREN saisis manuellement et non encore enrichis.")
-            if st.button(f"🔍 Enrichir les {len(_siren_a_traiter)} SIREN", type="primary", use_container_width=True, key="btn_sirene_2eme"):
+            if st.button(f"🔍 Enrichir les {len(_siren_a_traiter)} SIREN", type="primary", use_container_width=True, key="btn_sirene_3eme"):
                 df_e = df_preview_c.copy()
                 new_sc = set(sirene_cells); new_si = dict(sirene_info)
                 _ok = _ko = 0
@@ -2627,11 +2754,11 @@ with m_cli:
                 # Corriger : not_found ne peut pas être négatif
                 if st.session_state["meg_sirene_stats"]["not_found"] < 0:
                     st.session_state["meg_sirene_stats"]["not_found"] = _ko
-                st.session_state["_2eme_lame_result"] = f"2ème lame terminée : {_ok} enrichi(s), {_ko} non trouvé(s)"
+                st.session_state["_3eme_lame_result"] = f"3ème lame terminée : {_ok} enrichi(s), {_ko} non trouvé(s)"
                 st.rerun()
             # Afficher le résultat persistant
-            if st.session_state.get("_2eme_lame_result"):
-                st.success(st.session_state["_2eme_lame_result"])
+            if st.session_state.get("_3eme_lame_result"):
+                st.success(st.session_state["_3eme_lame_result"])
 
         # --- Enrichissement SIRENE (1ère lame — par nom ou SIREN existant) ---
         st.divider()
