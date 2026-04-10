@@ -3036,6 +3036,31 @@ with m_cli:
         else:
             st.success("✅ Tous les clients ont les champs obligatoires remplis — prêts pour l'injection.")
 
+        # --- Tableau final : état des données telles qu'elles seront envoyées ---
+        st.divider()
+        st.subheader(f"📋 Récapitulatif final — {len(df_preview_c)} {_entity_label}")
+        _final_cols = ["Source", "Code *", "Societe / Nom *", "Type *", "Code postal *", "Ville *",
+                       "Code pays (ISO 2) *", "Siren", "Siret", "TVA intracommunautaire",
+                       "Forme juridique", "APE / NAF", "Adresse", "Telephone"]
+        _final_cols = [c for c in _final_cols if c in df_preview_c.columns]
+        _df_final_show = df_preview_c[_final_cols].copy()
+        if "Source" not in _df_final_show.columns:
+            _df_final_show.insert(0, "Source", _df_final_show.index.map(lambda i: sources.get(i, "")))
+        # Convertir Siren/Siret en str
+        for _cs in ["Siren", "Siret"]:
+            if _cs in _df_final_show.columns:
+                _df_final_show[_cs] = _df_final_show[_cs].apply(lambda v: to_clean_str(v) if not pd.isna(v) else "")
+        # Colorer par source
+        def _color_final(row):
+            src = str(row.get("Source", ""))
+            if "Nouveau" in src: return ["background-color: #d4edda"] * len(row)
+            if "Doublon" in src: return ["background-color: #fff3cd"] * len(row)
+            if "Evoliz seul" in src: return ["background-color: #e8f4fd"] * len(row)
+            return [""] * len(row)
+        with st.expander(f"👁️ Voir les {len(df_preview_c)} {_entity_label} tels qu'ils seront envoyés", expanded=False):
+            st.dataframe(_df_final_show.style.apply(_color_final, axis=1), use_container_width=True, hide_index=True)
+            st.caption("🟢 = Nouveau | 🟡 = Doublon (MAJ) | 🔵 = Evoliz seul (MAJ)")
+
         # --- Injection ---
         st.divider()
         st.subheader(f"🚀 Injection {_entity_label} dans Evoliz")
