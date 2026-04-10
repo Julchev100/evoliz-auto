@@ -692,7 +692,7 @@ with m2:
             if (_c.get('companyid') or _c.get('id')) == _cid:
                 _company_name = _c.get('name', '')
                 break
-        st.success(f"Dossier « {_company_name or _cid} » chargé — {len(_ev_clients)} clients, {len(_ev_articles)} articles, {len(_ev_invoices)} factures (30j)")
+        st.success(f"Dossier « {_company_name or _cid} » chargé — {len(st.session_state.get('ev_clients_raw', []))} clients, {len(st.session_state.get('ev_articles_raw', []))} articles, {len(st.session_state.get('ev_invoices_raw', []))} factures (30j)")
     elif _h and not _cid and len(_companies) > 1:
         st.info("👆 Sélectionnez un dossier ci-dessus pour charger les données.")
 
