@@ -453,16 +453,18 @@ with m2:
     if auto_connect or btn_connect:
         if pk_105 and sk_105:
             save_creds(pk_105, sk_105)
+            r_log = None
             with st.spinner("Connexion à Evoliz en cours..."):
                 try:
                     r_log = requests.post("https://www.evoliz.io/api/login",
                                           json={"public_key": pk_105, "secret_key": sk_105}, timeout=15)
                 except Exception as e:
                     st.error(f"Erreur de connexion : {e}")
-                    r_log = None
-            if r_log and r_log.status_code in (429, 500, 502, 503, 504):
+            if r_log is None:
+                st.error("Aucune réponse du serveur Evoliz (timeout ou erreur réseau).")
+            elif r_log.status_code in (429, 500, 502, 503, 504):
                 st.warning(f"API Evoliz temporairement indisponible (HTTP {r_log.status_code}). Réessayez dans quelques instants.")
-            elif r_log and r_log.status_code == 200:
+            elif r_log.status_code == 200:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
@@ -496,8 +498,10 @@ with m2:
                         st.success(f"Connecté à Evoliz — mono-dossier (company: {cid})")
                     else:
                         st.warning("Connecté mais aucun dossier détecté. Vérifiez les droits de vos clés API (scope prescriber_users requis pour le multi-dossier).")
-            elif r_log:
-                st.error(f"Échec login : HTTP {r_log.status_code}")
+            else:
+                st.error(f"Échec login : HTTP {r_log.status_code} — {r_log.text[:300]}")
+        else:
+            st.warning("Renseignez la Public Key et la Secret Key pour vous connecter.")
 
     # --- Bloc 2 : Sélecteur de dossier (multi-company) ---
     _companies = st.session_state.get('companies_list', [])
@@ -507,25 +511,34 @@ with m2:
         _company_names = [f"{c.get('name', 'N/C')} (ID: {c.get('companyid') or c.get('id')})" for c in _companies]
         _company_ids = [c.get('companyid') or c.get('id') for c in _companies]
         _prev_cid = st.session_state.company_id_105
-        _default_idx = _company_ids.index(_prev_cid) if _prev_cid in _company_ids else 0
         _sel_idx = st.selectbox("Dossier Evoliz", range(len(_company_names)),
                                 format_func=lambda i: _company_names[i],
-                                index=_default_idx, key="company_select")
-        _sel_cid = _company_ids[_sel_idx]
-        if _sel_cid != _prev_cid:
-            st.session_state.company_id_105 = _sel_cid
-            # Réinitialiser les données du précédent dossier
-            st.session_state.ev_acc_105 = {}
-            st.session_state.ev_data_105 = {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}
-            for _k in ("ev_clients_raw", "ev_articles_raw", "ev_invoices_raw"):
-                st.session_state[_k] = []
-            st.rerun()
+                                index=None, placeholder="— Sélectionnez un dossier —",
+                                key="company_select")
+        if _sel_idx is not None:
+            _sel_cid = _company_ids[_sel_idx]
+            if _sel_cid != _prev_cid:
+                st.session_state.company_id_105 = _sel_cid
+                # Réinitialiser les données du précédent dossier
+                st.session_state.ev_acc_105 = {}
+                st.session_state.ev_data_105 = {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}
+                for _k in ("ev_clients_raw", "ev_articles_raw", "ev_invoices_raw"):
+                    st.session_state[_k] = []
+                st.rerun()
 
-    # --- Bloc 3 : Chargement des données (auto dès qu'un dossier est sélectionné) ---
+    # --- Bloc 3 : Chargement des données ---
+    _is_multi = len(st.session_state.get('companies_list', [])) > 1
     _cid = st.session_state.company_id_105
     _h = st.session_state.token_headers_105
     _data_empty = not (st.session_state.ev_acc_105 or st.session_state.get("ev_clients_raw") or st.session_state.get("ev_articles_raw") or st.session_state.get("ev_invoices_raw"))
+    # Mono-dossier : chargement auto. Multi-dossier : attendre sélection + clic.
+    _should_load = False
     if _h and _cid and _data_empty:
+        if _is_multi:
+            _should_load = st.button("📥 CHARGER LES DONNÉES DU DOSSIER", type="primary", use_container_width=True, key="btn_load_data")
+        else:
+            _should_load = True
+    if _should_load:
         _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
         with st.spinner("Lecture des données comptables Evoliz..."):
             st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", _h)
