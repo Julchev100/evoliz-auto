@@ -237,6 +237,7 @@ with st.sidebar:
     else:
         mod_compta = False
     mod_clients = st.checkbox("👥 Injection Clients", value=True, key="mod_clients")
+    mod_fournisseurs = st.checkbox("🏭 Injection Fournisseurs", value=True, key="mod_fournisseurs")
     mod_articles = st.checkbox("📦 Articles", value=True, key="mod_articles")
     mod_factures = st.checkbox("🧾 Factures & Avoirs", value=scope == "Parametrage complet", key="mod_factures")
     if mod_compta:
@@ -296,6 +297,8 @@ if mod_compta:
     _tab_names.append("🔍 Matrice comptable"); _tab_keys.append("matrice")
 if mod_clients:
     _tab_names.append("👥 Injection Clients"); _tab_keys.append("clients")
+if mod_fournisseurs:
+    _tab_names.append("🏭 Injection Fournisseurs"); _tab_keys.append("fournisseurs")
 if mod_articles:
     _tab_names.append("📦 Articles"); _tab_keys.append("articles")
 if mod_factures:
@@ -312,6 +315,7 @@ m4 = _tab_map.get("matrice", st.container())
 m6 = _tab_map.get("synthese", st.container())
 m7 = _tab_map.get("synchro", st.container())
 m_cli = _tab_map.get("clients", st.container())
+m_four = _tab_map.get("fournisseurs", st.container())
 m_fac = _tab_map.get("factures", st.container())
 m_art = _tab_map.get("articles", st.container())
 # Flags pour conditionner l'execution du contenu
@@ -320,6 +324,7 @@ _has_matrice_tab = "matrice" in _tab_map
 _has_synthese_tab = "synthese" in _tab_map
 _has_synchro_tab = "synchro" in _tab_map
 _has_clients_tab = "clients" in _tab_map
+_has_fournisseurs_tab = "fournisseurs" in _tab_map
 _has_factures_tab = "factures" in _tab_map
 _has_articles_tab = "articles" in _tab_map
 
@@ -339,6 +344,12 @@ with m_import:
         st.markdown("#### 👥 Clients")
         _f_clients = st.file_uploader("Fichier clients (Excel, CSV...)", type=["xlsx", "xls", "csv"], key="imp_clients")
         if _f_clients: st.session_state["imp_file_clients"] = _f_clients
+
+    if mod_fournisseurs:
+        st.markdown("---")
+        st.markdown("#### 🏭 Fournisseurs")
+        _f_fournisseurs = st.file_uploader("Fichier fournisseurs (Excel, CSV...)", type=["xlsx", "xls", "csv"], key="imp_fournisseurs")
+        if _f_fournisseurs: st.session_state["imp_file_fournisseurs"] = _f_fournisseurs
 
     if mod_factures:
         st.markdown("---")
@@ -360,6 +371,8 @@ with m_import:
         _files_status.append({"Fichier": "📂 Balance", "Statut": "✅ Charge" if st.session_state.get("imp_file_balance") else "❌ Non charge"})
     if mod_clients:
         _files_status.append({"Fichier": "👥 Clients", "Statut": "✅ Charge" if st.session_state.get("imp_file_clients") else "❌ Non charge"})
+    if mod_fournisseurs:
+        _files_status.append({"Fichier": "🏭 Fournisseurs", "Statut": "✅ Charge" if st.session_state.get("imp_file_fournisseurs") else "❌ Non charge"})
     if mod_factures:
         _files_status.append({"Fichier": "🧾 Factures", "Statut": "✅ Charge" if st.session_state.get("imp_file_factures") else "❌ Non charge"})
     if mod_articles:
@@ -1778,6 +1791,7 @@ def _parse_date(v):
     return v
 
 H_CLIENT = ["Code *","Date de creation","Societe / Nom *","Type *","Civilite","Forme juridique","Siren","APE / NAF","TVA intracommunautaire","Numero Immatriculation","Banque","RIB","IBAN","BIC","Adresse","Complement d'adresse","Complement d'adresse (suite)","Code postal *","Ville *","Pays","Code pays (ISO 2) *","Siret","Nb adresses livraison","Telephone","Portable","Fax","Site web","Montant de l'encours garanti","Commentaires","Desactive","Taux de penalite","Aucun Taux de penalite","Frais de recouvrement","Taux d'escompte","Aucun Taux d'escompte","Conditions de reglement","Mode de paiement","Duree de validite","Mode de saisie des prix","Taux de TVA","Remise globale","Article d'exoneration","ZRR","Code ZRR","Devise"]
+H_FOURNISSEUR = ["Code *","Date de creation","Raison sociale *","Forme juridique","Siret","APE / NAF","TVA intracommunautaire","RIB","IBAN","BIC","Adresse","Adresse (suite)","Code postal","Ville","Pays","Code pays (ISO 2)","Telephone","Portable","Fax","Site web","Classification","Code classification","Commentaires","Desactive","Conditions de reglement","Mode de paiement","Axe 1","Code Axe 1"]
 H_CONTACT = ["Nom Client","Code client *","Civilite","Nom *","Prenom","E-mail","Metier/Fonction","Consentement *","Libelle Telephone","Telephone","Libelle Telephone 2","Telephone 2","Libelle Telephone 3","Telephone 3","Desactive"]
 H_FACTURE = ["N facture externe *","Date facture *","Client","Code client *","Nom adresse de livraison","Code adresse de livraison","Total TVA","Total HT","Total TTC","Total regle","Etat","Date Etat","Date de creation","Objet","Date d'echeance","Date d'execution","Taux de penalite","Frais de recouvrement","Taux d'escompte","Conditions de reglement *","Mode de paiement","Remise globale","Acompte","Nombre de relance","Commentaires","N facture","Annule","Catalogue","Ref.","Designation *","Qte *","Unite","PU HT *","Remise","TVA","Total TVA","Total HT","Classification vente","Code Classification vente","Prix d'achat HT","Createur"]
 H_AVOIR = ["N avoir externe *","Date avoir *","Client","Code client *","Nom adresse de livraison","Code adresse de livraison","Total TVA","Total HT","Total TTC","Etat","Date de creation avoir","Objet","Date d'echeance","Taux de penalite","Frais de recouvrement","Taux d'escompte","Conditions de reglement *","Mode de paiement","Remise globale","Acompte","Commentaires","Annule","Catalogue","Ref.","Designation *","Qte *","Unite","PU HT *","Remise","TVA","Total TVA","Total HT","Classification vente","Code Classification vente","Createur"]
@@ -1851,6 +1865,12 @@ def _auto_map_columns(src_columns):
 
 # --- Onglet Injection Clients ---
 with m_cli:
+    _is_supplier = False
+    _entity_label = "clients"
+    _entity_api = "clients"
+    _entity_id_field = "clientid"
+    _entity_name_field = "Societe / Nom"
+    _H_ENTITY = H_CLIENT
     st.subheader("👥 Injection Clients")
     st.caption("1. Importez un fichier clients  2. Consolidation avec Evoliz  3. Enrichissement Sirene  4. Injection")
 
@@ -1943,13 +1963,22 @@ with m_cli:
         st.dataframe(df_src.head(5), use_container_width=True, hide_index=True)
 
         # --- Auto-mapping inverse ---
-        all_evoliz_fields = ["— Ignorer",
-            "Societe / Nom", "Code", "Type", "Code postal", "Ville", "Code pays (ISO 2)",
-            "Civilite", "Prenom", "Nom contact",
-            "Forme juridique", "Siren", "Siret", "APE / NAF", "TVA intracommunautaire",
-            "Adresse", "Complement d'adresse", "Pays",
-            "Telephone", "Portable", "Fax", "E-mail", "Site web", "Commentaires"]
-        required_set = {"Societe / Nom", "Code", "Code postal", "Ville", "Code pays (ISO 2)"}
+        if _is_supplier:
+            all_evoliz_fields = ["— Ignorer",
+                "Raison sociale", "Code", "Code postal", "Ville", "Code pays (ISO 2)",
+                "Forme juridique", "Siren", "Siret", "APE / NAF", "TVA intracommunautaire",
+                "Adresse", "Adresse (suite)", "Pays",
+                "Telephone", "Portable", "Fax", "E-mail", "Site web",
+                "Classification", "Code classification", "Commentaires"]
+            required_set = {"Raison sociale", "Code"}
+        else:
+            all_evoliz_fields = ["— Ignorer",
+                "Societe / Nom", "Code", "Type", "Code postal", "Ville", "Code pays (ISO 2)",
+                "Civilite", "Prenom", "Nom contact",
+                "Forme juridique", "Siren", "Siret", "APE / NAF", "TVA intracommunautaire",
+                "Adresse", "Complement d'adresse", "Pays",
+                "Telephone", "Portable", "Fax", "E-mail", "Site web", "Commentaires"]
+            required_set = {"Societe / Nom", "Code", "Code postal", "Ville", "Code pays (ISO 2)"}
 
         # Recalculer le mapping si fichier change ou si colonnes ont change (ajout auto)
         current_cols_sig = ",".join(df_src.columns.tolist())
@@ -2002,7 +2031,7 @@ with m_cli:
         st.divider()
         st.subheader("📋 Controle des champs obligatoires")
 
-        required_fields_ordered = ["Societe / Nom", "Code", "Code postal", "Ville", "Code pays (ISO 2)"]
+        required_fields_ordered = list(required_set)
         ctrl_rows = []
         for ef in required_fields_ordered:
             served = ef in mapping
@@ -2068,9 +2097,9 @@ with m_cli:
                     if not col or col == "— Ignorer" or col not in df_src.columns: return ""
                     return to_clean_str(row.get(col, ""))
 
-                # Lire les clients Evoliz
+                # Lire les entités Evoliz (clients ou fournisseurs)
                 ev_clients = []; ev_by_name = {}; ev_by_siren = {}
-                url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/clients" if cid else "https://www.evoliz.io/api/v1/clients"
+                url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}" if cid else f"https://www.evoliz.io/api/v1/{_entity_api}"
                 page = 1
                 while True:
                     r = requests.get(url_cli, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
@@ -2079,7 +2108,7 @@ with m_cli:
                     for it in d.get("data", []):
                         adr = it.get("address") or {}
                         entry = {
-                            "clientid": it.get("clientid"), "code": (it.get("code") or "").strip(),
+                            _entity_id_field: it.get(_entity_id_field), "code": (it.get("code") or "").strip(),
                             "name": (it.get("name") or "").strip(), "type": (it.get("type") or ""),
                             "vat_number": (it.get("vat_number") or ""), "business_number": (it.get("business_number") or ""),
                             "business_identification_number": (it.get("business_identification_number") or ""),
@@ -2093,19 +2122,19 @@ with m_cli:
                         ev_clients.append(entry)
                         n = norm_piv(entry["name"])
                         if n: ev_by_name[n] = entry
-                        s = entry["business_identification_number"].strip()
+                        s = entry.get("business_identification_number", "").strip()
                         if s and s != "N/C": ev_by_siren[s] = entry
                     if page >= d.get("meta", {}).get("last_page", 1): break
                     page += 1
 
                 # Construire la liste consolidee
-                ci = {h.split(" *")[0]: i for i, h in enumerate(H_CLIENT)}
+                ci = {h.split(" *")[0]: i for i, h in enumerate(_H_ENTITY)}
                 consol_rows = []; seen_ev_ids = set()
 
                 for _, row in df_src.iterrows():
-                    nom = _get(row, "Societe / Nom")
+                    nom = _get(row, _entity_name_field)
                     prenom = _get(row, "Prenom"); nom_contact = _get(row, "Nom contact")
-                    if not nom and (prenom or nom_contact): nom = f"{prenom} {nom_contact}".strip()
+                    if not nom and not _is_supplier and (prenom or nom_contact): nom = f"{prenom} {nom_contact}".strip()
                     if not nom: continue
                     _raw_code = _get(row, "Code")
                     # Si le code est un UUID ou trop long, generer depuis le nom
@@ -2131,7 +2160,7 @@ with m_cli:
                     else: iso2 = "FR"
 
                     entry = {
-                        "Code": code, "Societe / Nom": nom, "Type": type_c,
+                        "Code": code, _entity_name_field: nom, "Type": type_c if not _is_supplier else "",
                         "Siren": _get(row, "Siren"), "Siret": _get(row, "Siret"),
                         "TVA intracommunautaire": _get(row, "TVA intracommunautaire") or ("NC" if type_c != "Particulier" else ""),
                         "Forme juridique": _normalize_forme_juridique(_get(row, "Forme juridique")),
@@ -2146,18 +2175,18 @@ with m_cli:
                     ev = ev_by_name.get(norm_piv(nom))
                     if not ev and siren_val: ev = ev_by_siren.get(siren_val)
                     if ev:
-                        seen_ev_ids.add(ev["clientid"])
+                        seen_ev_ids.add(ev[_entity_id_field])
                         entry["_source"] = "📄+☁️ Doublon"
-                        entry["_clientid"] = ev["clientid"]
+                        entry["_entityid"] = ev[_entity_id_field]
                     else:
                         entry["_source"] = "📄 Nouveau"
-                        entry["_clientid"] = None
+                        entry["_entityid"] = None
                     consol_rows.append(entry)
 
                 for ev in ev_clients:
-                    if ev["clientid"] not in seen_ev_ids:
+                    if ev[_entity_id_field] not in seen_ev_ids:
                         consol_rows.append({
-                            "Code": ev["code"], "Societe / Nom": ev["name"], "Type": ev["type"],
+                            "Code": ev["code"], _entity_name_field: ev["name"], "Type": ev.get("type", ""),
                             "Siren": ev["business_identification_number"], "Siret": ev["business_number"],
                             "TVA intracommunautaire": ev["vat_number"], "Forme juridique": ev["legalform"],
                             "APE / NAF": ev["activity_number"],
@@ -2165,12 +2194,12 @@ with m_cli:
                             "Code postal": ev["postcode"], "Ville": ev["town"], "Code pays (ISO 2)": ev["iso2"],
                             "Telephone": ev["phone"], "Portable": ev["mobile"],
                             "Fax": ev["fax"], "Site web": ev["website"], "Commentaires": "",
-                            "_source": "☁️ Evoliz seul", "_clientid": ev["clientid"],
+                            "_source": "☁️ Evoliz seul", "_entityid": ev[_entity_id_field],
                         })
 
-                wb_c, ws_c = _make_wb(H_CLIENT)
+                wb_c, ws_c = _make_wb(_H_ENTITY)
                 for cr in consol_rows:
-                    ro = [None] * len(H_CLIENT)
+                    ro = [None] * len(_H_ENTITY)
                     for field, idx_c in ci.items():
                         if field in cr: ro[idx_c] = cr[field]
                     ws_c.append(ro)
@@ -2181,7 +2210,7 @@ with m_cli:
                 st.session_state["meg_df_clients"] = df_preview_c
                 st.session_state["meg_df_clients_original"] = df_preview_c.copy()
                 st.session_state["meg_consol_sources"] = {i: cr["_source"] for i, cr in enumerate(consol_rows)}
-                st.session_state["meg_consol_ev_ids"] = {i: cr["_clientid"] for i, cr in enumerate(consol_rows)}
+                st.session_state["meg_consol_ev_ids"] = {i: cr["_entityid"] for i, cr in enumerate(consol_rows)}
                 st.session_state["meg_consol_stats"] = {
                     "fichier": sum(1 for cr in consol_rows if "Nouveau" in cr["_source"]),
                     "doublons": sum(1 for cr in consol_rows if "Doublon" in cr["_source"]),
@@ -2354,7 +2383,7 @@ with m_cli:
             progress.empty()
             st.session_state["meg_df_clients"] = df_e; st.session_state["meg_sirene_cells"] = new_sc; st.session_state["meg_sirene_info"] = new_si
             st.session_state["meg_sirene_log"] = log_rows; st.session_state["meg_sirene_stats"] = {"enriched":enriched,"already_complete":already_complete,"not_found":not_found_count,"skipped":skipped}
-            wb_n, ws_n = _make_wb(H_CLIENT)
+            wb_n, ws_n = _make_wb(_H_ENTITY)
             for _, rw in df_e.iterrows(): ws_n.append([rw.iloc[i] if not pd.isna(rw.iloc[i]) else None for i in range(len(rw))])
             with open(GABARIT_CLIENT_PATH,"wb") as f: f.write(_wb_bytes(wb_n))
             st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver",0)+1
@@ -2418,7 +2447,7 @@ with m_cli:
                         # Retirer des suggestions
                         del st.session_state["meg_sirene_suggestions"][idx]
                         # Regenerer le workbook
-                        wb_n, ws_n = _make_wb(H_CLIENT)
+                        wb_n, ws_n = _make_wb(_H_ENTITY)
                         for _, rw in df_preview_c.iterrows():
                             ws_n.append([rw.iloc[i] if not pd.isna(rw.iloc[i]) else None for i in range(len(rw))])
                         with open(GABARIT_CLIENT_PATH, "wb") as f: f.write(_wb_bytes(wb_n))
@@ -2429,21 +2458,22 @@ with m_cli:
         # --- Etape 4 : Injection ---
         sirene_cells_per_row = {r for (r,_) in sirene_cells}
         st.divider()
-        st.subheader("🚀 Injection dans Evoliz")
-        inject_btn = st.button("🚀 Injecter les clients", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api)
+        st.subheader(f"🚀 Injection {_entity_label} dans Evoliz")
+        inject_btn = st.button(f"🚀 Injecter les {_entity_label}", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api)
         if inject_btn and has_api:
             headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
-            url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/clients" if cid else "https://www.evoliz.io/api/v1/clients"
+            url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}" if cid else f"https://www.evoliz.io/api/v1/{_entity_api}"
             ev_ids = st.session_state.get("meg_consol_ev_ids", {})
             df_final = df_preview_c.copy(); df_orig = st.session_state.get("meg_df_clients_original")
             for idx in df_final.index:
                 if df_orig is not None and idx in sirene_cells_per_row and not enrichir_flags.get(idx, True):
                     if idx < len(df_orig): df_final.iloc[idx] = df_orig.iloc[idx]
-            ci_h = {h.split(" *")[0]: i for i, h in enumerate(H_CLIENT)}
+            ci_h = {h.split(" *")[0]: i for i, h in enumerate(_H_ENTITY)}
+            _name_col = "Raison sociale" if _is_supplier else "Societe / Nom"
             created=updated=up_to_date=skipped_inj=0; errors=[]; inject_log=[]
             progress = st.progress(0, text="Injection...")
             for idx, row in df_final.iterrows():
-                nom = to_clean_str(row.iloc[ci_h["Societe / Nom"]]) if ci_h.get("Societe / Nom") is not None else ""
+                nom = to_clean_str(row.iloc[ci_h[_name_col]]) if ci_h.get(_name_col) is not None else ""
                 if not nom: skipped_inj += 1; continue
                 code = to_clean_str(row.iloc[ci_h["Code"]]) if ci_h.get("Code") is not None else ""
                 type_c = to_clean_str(row.iloc[ci_h["Type"]]) if ci_h.get("Type") is not None else "Professionnel"
@@ -2451,7 +2481,9 @@ with m_cli:
                 ville = to_clean_str(row.iloc[ci_h["Ville"]]) if ci_h.get("Ville") is not None else ""
                 _iso2_raw = to_clean_str(row.iloc[ci_h["Code pays (ISO 2)"]]) if ci_h.get("Code pays (ISO 2)") is not None else ""
                 iso2v = _iso2_raw.upper()[:2] if _iso2_raw and len(_iso2_raw) >= 2 and _iso2_raw.isalpha() else "FR"
-                payload = {"name":nom,"type":type_c,"address":{"postcode":cp if cp and cp!="NC" else "00000","town":ville if ville and ville!="NC" else "NC","iso2":iso2v}}
+                payload = {"name":nom,"address":{"postcode":cp if cp and cp!="NC" else "00000","town":ville if ville and ville!="NC" else "NC","iso2":iso2v}}
+                if not _is_supplier:
+                    payload["type"] = type_c
                 if code: payload["code"] = code[:20]
                 tva_v = to_clean_str(row.iloc[ci_h["TVA intracommunautaire"]]) if ci_h.get("TVA intracommunautaire") is not None else ""
                 payload["vat_number"] = tva_v if tva_v and tva_v != "NC" else "N/C"
@@ -2488,6 +2520,261 @@ with m_cli:
                     if "❌" in s: return ["background-color:#f8d7da"]*len(row)
                     return [""]*len(row)
                 st.dataframe(df_il.style.apply(_ci, axis=1), use_container_width=True, hide_index=True)
+
+
+# --- Onglet Injection Fournisseurs ---
+with m_four:
+    st.subheader("🏭 Injection Fournisseurs")
+    st.caption("1. Importez un fichier fournisseurs  2. Mapping colonnes  3. Consolidation Evoliz  4. Injection")
+
+    f_meg_four = st.session_state.get("imp_file_fournisseurs")
+    if not f_meg_four:
+        st.info("Importez d'abord un fichier fournisseurs dans l'onglet 📁 Import fichiers.")
+
+    if f_meg_four:
+        # Lecture fichier
+        if f_meg_four.name.lower().endswith(".csv"):
+            df_four = None
+            for _enc in ["utf-8", "latin-1", "cp1252"]:
+                for _sep in [None, ";", ","]:
+                    try:
+                        f_meg_four.seek(0)
+                        _kw = {"header": 0, "encoding": _enc}
+                        if _sep: _kw["sep"] = _sep
+                        else: _kw["sep"] = None; _kw["engine"] = "python"
+                        df_four = pd.read_csv(f_meg_four, **_kw)
+                        if len(df_four.columns) > 1: break
+                        df_four = None
+                    except Exception:
+                        df_four = None
+                if df_four is not None: break
+            if df_four is None:
+                st.error("Impossible de lire ce fichier CSV.")
+                f_meg_four = None
+        else:
+            df_four = _read_meg(f_meg_four)
+
+        if f_meg_four and df_four is not None:
+            st.caption(f"Fichier lu : **{len(df_four)} lignes**, **{len(df_four.columns)} colonnes**")
+            st.dataframe(df_four.head(5), use_container_width=True, hide_index=True)
+
+            # --- Mapping colonnes ---
+            all_four_fields = ["— Ignorer",
+                "Raison sociale", "Code", "Code postal", "Ville", "Code pays (ISO 2)",
+                "Forme juridique", "Siret", "APE / NAF", "TVA intracommunautaire",
+                "Adresse", "Adresse (suite)", "Pays",
+                "Telephone", "Portable", "Fax", "E-mail", "Site web",
+                "Classification", "Code classification", "Commentaires"]
+
+            # Auto-mapping
+            _four_file_sig = f_meg_four.name + ",".join(df_four.columns.tolist())
+            if st.session_state.get("_four_last_sig") != _four_file_sig:
+                fwd_f = _auto_map_columns(df_four.columns.tolist())
+                # Adapter les noms : "Societe / Nom" -> "Raison sociale"
+                rev_f = {}
+                for ef, sc in fwd_f.items():
+                    mapped = ef
+                    if ef == "Societe / Nom": mapped = "Raison sociale"
+                    if ef == "Complement d'adresse": mapped = "Adresse (suite)"
+                    if mapped in all_four_fields and sc not in rev_f:
+                        rev_f[sc] = mapped
+                st.session_state["_four_col_rev"] = rev_f
+                st.session_state["_four_last_sig"] = _four_file_sig
+
+            rev_map_f = st.session_state.get("_four_col_rev", {})
+
+            st.divider()
+            st.subheader("🔗 Mapping des colonnes")
+            mapping_rev_f = {}
+            n_cols_f = len(df_four.columns)
+            for i in range(0, n_cols_f, 2):
+                ui_cols_f = st.columns(2)
+                for j in range(2):
+                    if i + j >= n_cols_f: break
+                    src_col = df_four.columns[i + j]
+                    default_ev = rev_map_f.get(src_col, "— Ignorer")
+                    idx_f = all_four_fields.index(default_ev) if default_ev in all_four_fields else 0
+                    with ui_cols_f[j]:
+                        chosen_f = st.selectbox(f"📄 **{src_col}**", all_four_fields, index=idx_f, key=f"fmap_{i+j}")
+                        mapping_rev_f[src_col] = chosen_f
+
+            mapping_f = {}
+            for sc, ef in mapping_rev_f.items():
+                if ef != "— Ignorer" and ef not in mapping_f:
+                    mapping_f[ef] = sc
+
+            # Controle champs obligatoires
+            st.divider()
+            st.subheader("📋 Controle des champs obligatoires")
+            _four_required = ["Raison sociale", "Code"]
+            ctrl_f = []
+            for ef in _four_required:
+                if ef in mapping_f:
+                    ctrl_f.append({"Champ": ef, "Statut": "✅ Mappé", "Source": mapping_f[ef]})
+                elif ef == "Code":
+                    ctrl_f.append({"Champ": ef, "Statut": "🔄 Auto-généré", "Source": "Généré depuis le nom"})
+                else:
+                    ctrl_f.append({"Champ": ef, "Statut": "❌ Manquant", "Source": ""})
+            st.dataframe(pd.DataFrame(ctrl_f), use_container_width=True, hide_index=True)
+
+            # --- Consolidation + Injection ---
+            has_api_f = bool(st.session_state.get("token_headers_105"))
+            _four_file_id = f_meg_four.name + str(f_meg_four.size)
+            _four_already = st.session_state.get("_four_consol_id") == _four_file_id
+            _four_auto = not _four_already
+            _four_manual = st.button("🔄 Consolider avec Evoliz", use_container_width=True, key="btn_consol_four")
+
+            if has_api_f and (_four_auto or _four_manual):
+                st.session_state["_four_consol_id"] = _four_file_id
+                headers_f = st.session_state.token_headers_105
+                cid_f = st.session_state.company_id_105
+                if not cid_f:
+                    st.error("Aucun dossier sélectionné.")
+                    st.stop()
+
+                with st.spinner("Lecture des fournisseurs Evoliz..."):
+                    ev_four = []; ev_f_by_name = {}
+                    url_four = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                    page_f = 1
+                    while True:
+                        r_f = requests.get(url_four, headers=headers_f, params={"per_page": 100, "page": page_f}, timeout=15)
+                        if r_f.status_code != 200: break
+                        d_f = r_f.json()
+                        for it in d_f.get("data", []):
+                            adr = it.get("address") or {}
+                            entry_f = {
+                                "supplierid": it.get("supplierid"), "code": (it.get("code") or "").strip(),
+                                "name": (it.get("name") or "").strip(),
+                                "business_number": (it.get("business_number") or ""),
+                                "business_identification_number": (it.get("business_identification_number") or ""),
+                                "vat_number": (it.get("vat_number") or ""),
+                                "legalform": (it.get("legal_status") or {}).get("label", "") if isinstance(it.get("legal_status"), dict) else "",
+                                "activity_number": (it.get("activity_number") or ""),
+                                "phone": (it.get("phone") or ""), "mobile": (it.get("mobile") or ""),
+                                "fax": (it.get("fax") or ""), "website": (it.get("website") or ""),
+                                "addr": (adr.get("addr") or ""), "postcode": (adr.get("postcode") or ""),
+                                "town": (adr.get("town") or ""), "iso2": (adr.get("iso2") or ""),
+                            }
+                            ev_four.append(entry_f)
+                            n_f = norm_piv(entry_f["name"])
+                            if n_f: ev_f_by_name[n_f] = entry_f
+                        if page_f >= d_f.get("meta", {}).get("last_page", 1): break
+                        page_f += 1
+
+                # Construction liste consolidée
+                consol_four = []; seen_four_ids = set()
+                for _, row in df_four.iterrows():
+                    nom = to_clean_str(row.get(mapping_f.get("Raison sociale", ""), "")) if "Raison sociale" in mapping_f else ""
+                    if not nom: continue
+                    _raw_code = to_clean_str(row.get(mapping_f.get("Code", ""), "")) if "Code" in mapping_f else ""
+                    code = _raw_code if _raw_code and len(_raw_code) <= 20 else norm_piv(nom)[:15]
+                    entry_c = {"Code": code, "Raison sociale": nom, "_source": "📄 Nouveau", "_entityid": None}
+                    for fld in ["Siret", "APE / NAF", "TVA intracommunautaire", "Forme juridique",
+                                "Adresse", "Adresse (suite)", "Code postal", "Ville", "Code pays (ISO 2)",
+                                "Telephone", "Portable", "Fax", "Site web", "Commentaires"]:
+                        col = mapping_f.get(fld)
+                        entry_c[fld] = to_clean_str(row.get(col, "")) if col and col in df_four.columns else ""
+                    if not entry_c.get("Code pays (ISO 2)"): entry_c["Code pays (ISO 2)"] = "FR"
+                    ev = ev_f_by_name.get(norm_piv(nom))
+                    if ev:
+                        seen_four_ids.add(ev["supplierid"])
+                        entry_c["_source"] = "📄+☁️ Doublon"
+                        entry_c["_entityid"] = ev["supplierid"]
+                    consol_four.append(entry_c)
+
+                for ev in ev_four:
+                    if ev["supplierid"] not in seen_four_ids:
+                        consol_four.append({
+                            "Code": ev["code"], "Raison sociale": ev["name"],
+                            "Siret": ev["business_number"], "TVA intracommunautaire": ev["vat_number"],
+                            "Forme juridique": ev["legalform"], "APE / NAF": ev["activity_number"],
+                            "Adresse": ev["addr"], "Adresse (suite)": "",
+                            "Code postal": ev["postcode"], "Ville": ev["town"], "Code pays (ISO 2)": ev["iso2"],
+                            "Telephone": ev["phone"], "Portable": ev["mobile"],
+                            "Fax": ev["fax"], "Site web": ev["website"], "Commentaires": "",
+                            "_source": "☁️ Evoliz seul", "_entityid": ev["supplierid"],
+                        })
+
+                st.session_state["_four_consol"] = consol_four
+                st.session_state["_four_consol_stats"] = {
+                    "fichier": sum(1 for c in consol_four if "Nouveau" in c["_source"]),
+                    "doublons": sum(1 for c in consol_four if "Doublon" in c["_source"]),
+                    "evoliz_seul": sum(1 for c in consol_four if "Evoliz seul" in c["_source"]),
+                    "total_evoliz": len(ev_four),
+                }
+                st.rerun()
+
+            # Affichage consolidation
+            consol_four = st.session_state.get("_four_consol", [])
+            stats_f = st.session_state.get("_four_consol_stats")
+            if stats_f:
+                st.divider()
+                st.subheader("📊 Consolidation")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("📄 Nouveaux", stats_f["fichier"])
+                c2.metric("📄+☁️ Doublons", stats_f["doublons"])
+                c3.metric("☁️ Evoliz seul", stats_f["evoliz_seul"])
+                c4.metric("☁️ Total Evoliz", stats_f["total_evoliz"])
+
+            if consol_four:
+                df_four_preview = pd.DataFrame([{k: v for k, v in c.items() if not k.startswith("_")} for c in consol_four])
+                _sources_f = [c["_source"] for c in consol_four]
+                df_four_preview.insert(0, "Source", _sources_f)
+                st.dataframe(df_four_preview, use_container_width=True, hide_index=True)
+
+                # Injection
+                st.divider()
+                st.subheader("🚀 Injection fournisseurs dans Evoliz")
+                inject_four_btn = st.button("🚀 Injecter les fournisseurs", type="primary", use_container_width=True, key="btn_inject_four", disabled=not has_api_f)
+                if inject_four_btn and has_api_f:
+                    headers_f = st.session_state.token_headers_105; cid_f = st.session_state.company_id_105
+                    url_four = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                    created_f=updated_f=skipped_f=0; errors_f=[]; inject_log_f=[]
+                    progress_f = st.progress(0, text="Injection fournisseurs...")
+                    for i, cr in enumerate(consol_four):
+                        nom = cr.get("Raison sociale", "")
+                        if not nom: skipped_f += 1; continue
+                        code = cr.get("Code", "")
+                        cp = cr.get("Code postal", ""); ville = cr.get("Ville", "")
+                        iso2 = cr.get("Code pays (ISO 2)", "FR").upper()[:2] if cr.get("Code pays (ISO 2)") else "FR"
+                        payload_f = {
+                            "name": nom,
+                            "address": {"postcode": cp or "00000", "town": ville or "NC", "iso2": iso2},
+                        }
+                        if code: payload_f["code"] = code[:20]
+                        tva_v = cr.get("TVA intracommunautaire", "")
+                        payload_f["vat_number"] = tva_v if tva_v and tva_v != "NC" else "N/C"
+                        siret_v = cr.get("Siret", "")
+                        payload_f["business_number"] = siret_v if siret_v and siret_v != "NC" else "N/C"
+                        for fld, ak in [("Forme juridique","legalform"),("APE / NAF","activity_number"),
+                                        ("Telephone","phone"),("Portable","mobile"),("Fax","fax"),
+                                        ("Site web","website"),("Commentaires","comment")]:
+                            v = cr.get(fld, "")
+                            if v and v != "NC": payload_f[ak] = v
+                        adr = cr.get("Adresse", "")
+                        if adr: payload_f["address"]["addr"] = adr
+
+                        entity_id = cr.get("_entityid")
+                        if entity_id:
+                            r_f = requests.patch(f"{url_four}/{entity_id}", headers=headers_f, json=payload_f, timeout=15)
+                            if r_f.status_code in (200, 204): updated_f += 1; inject_log_f.append({"Code": code, "Nom": nom, "Action": "🔄 MAJ", "Statut": "✅ OK", "Detail": ""})
+                            else: errors_f.append(f"MAJ '{nom}': HTTP {r_f.status_code}"); inject_log_f.append({"Code": code, "Nom": nom, "Action": "🔄 MAJ", "Statut": f"❌ {r_f.status_code}", "Detail": r_f.text[:80]})
+                        else:
+                            r_f = requests.post(url_four, headers=headers_f, json=payload_f, timeout=15)
+                            if r_f.status_code in (200, 201): created_f += 1; inject_log_f.append({"Code": code, "Nom": nom, "Action": "➕ Creation", "Statut": "✅ OK", "Detail": ""})
+                            elif r_f.status_code == 400 and "already been taken" in r_f.text: updated_f += 1; inject_log_f.append({"Code": code, "Nom": nom, "Action": "🔄 Existant", "Statut": "✅ OK", "Detail": ""})
+                            else: errors_f.append(f"Creation '{nom}': HTTP {r_f.status_code}"); inject_log_f.append({"Code": code, "Nom": nom, "Action": "➕ Creation", "Statut": f"❌ {r_f.status_code}", "Detail": r_f.text[:80]})
+                        progress_f.progress((i + 1) / len(consol_four), text=f"{i + 1}/{len(consol_four)} - {nom[:30]}")
+                        time.sleep(0.15)
+                    progress_f.empty()
+                    st.divider(); st.subheader("📊 Synthese")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("➕ Créés", created_f); c2.metric("🔄 MAJ", updated_f); c3.metric("⏭️ Ignorés", skipped_f); c4.metric("❌ Erreurs", len(errors_f))
+                    if created_f + updated_f > 0: st.success(f"Injection : {created_f} créé(s), {updated_f} mis à jour")
+                    elif errors_f: st.error(f"{len(errors_f)} erreur(s)")
+                    if inject_log_f:
+                        df_il_f = pd.DataFrame(inject_log_f)
+                        st.dataframe(df_il_f, use_container_width=True, hide_index=True)
 
 
 # --- Onglet Bascule Factures ---
