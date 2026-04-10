@@ -2506,12 +2506,13 @@ with m_cli:
                     st.session_state["meg_df_clients"] = df_preview_c
 
         # Détecter les SIREN modifiés et relancer la recherche
-        if "Siren" in df_show.columns and "Siren" in edited.columns:
+        if "Siren" in edited.columns:
             _siren_changed = []
             for i in edited.index:
-                _old = str(df_show.at[i, "Siren"]).replace("🟢 ", "").strip() if i in df_show.index else ""
-                _new = str(edited.at[i, "Siren"]).strip()
-                if _new != _old and _new and len(_new) >= 9 and _new.isdigit():
+                # Comparer contre la source (df_preview_c), pas contre df_show (filtré/formaté)
+                _old_raw = to_clean_str(df_preview_c.at[i, "Siren"]) if "Siren" in df_preview_c.columns and i in df_preview_c.index else ""
+                _new = str(edited.at[i, "Siren"]).replace("🟢 ", "").strip()
+                if _new and _new != _old_raw and len(_new) >= 9 and _new.isdigit():
                     _siren_changed.append((i, _new))
             if _siren_changed:
                 with st.spinner(f"Recherche Sirene pour {len(_siren_changed)} SIREN modifié(s)..."):
