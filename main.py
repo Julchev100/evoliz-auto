@@ -617,13 +617,8 @@ with m2:
     _cid = st.session_state.company_id_105
     _h = st.session_state.token_headers_105
     _data_empty = not (st.session_state.ev_acc_105 or st.session_state.get("ev_clients_raw") or st.session_state.get("ev_articles_raw") or st.session_state.get("ev_invoices_raw"))
-    # Mono-dossier : chargement auto. Multi-dossier : attendre sélection + clic.
-    _should_load = False
-    if _h and _cid and _data_empty:
-        if _is_multi:
-            _should_load = st.button("📥 CHARGER LES DONNÉES DU DOSSIER", type="primary", use_container_width=True, key="btn_load_data")
-        else:
-            _should_load = True
+    # Chargement auto dès qu'un dossier est sélectionné et que les données sont vides
+    _should_load = _h and _cid and _data_empty
     if _should_load:
         _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
         with st.spinner("Lecture des données comptables Evoliz..."):
