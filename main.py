@@ -508,8 +508,19 @@ with m2:
     if st.session_state.token_headers_105 and len(_companies) > 1:
         st.divider()
         st.subheader("📁 Sélection du dossier")
-        _company_names = [f"{c.get('name', 'N/C')} (ID: {c.get('companyid') or c.get('id')})" for c in _companies]
-        _company_ids = [c.get('companyid') or c.get('id') for c in _companies]
+
+        # Filtre par site (champ home_site dans le détail company)
+        _sites = sorted({c.get('home_site', '') for c in _companies})
+        _sites = [s for s in _sites if s]
+
+        _filtered = _companies
+        if _sites:
+            _site_filter = st.selectbox("Filtrer par site", ["— Tous les sites —"] + _sites, key="site_filter")
+            if _site_filter != "— Tous les sites —":
+                _filtered = [c for c in _companies if c.get('home_site', '') == _site_filter]
+
+        _company_names = [f"{c.get('name', 'N/C')} (ID: {c.get('companyid') or c.get('id')})" for c in _filtered]
+        _company_ids = [c.get('companyid') or c.get('id') for c in _filtered]
         _prev_cid = st.session_state.company_id_105
         _sel_idx = st.selectbox("Dossier Evoliz", range(len(_company_names)),
                                 format_func=lambda i: _company_names[i],
@@ -525,6 +536,14 @@ with m2:
                 for _k in ("ev_clients_raw", "ev_articles_raw", "ev_invoices_raw"):
                     st.session_state[_k] = []
                 st.rerun()
+
+
+    # --- Affichage du dossier actif ---
+    _cid = st.session_state.company_id_105
+    if _cid and _companies:
+        _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
+        if _current:
+            st.info(f"📂 Dossier actif : **{_current.get('name', 'N/C')}** (ID: {_cid})")
 
     # --- Bloc 3 : Chargement des données ---
     _is_multi = len(st.session_state.get('companies_list', [])) > 1
