@@ -3057,9 +3057,28 @@ with m_cli:
             if "Doublon" in src: return ["background-color: #fff3cd"] * len(row)
             if "Evoliz seul" in src: return ["background-color: #e8f4fd"] * len(row)
             return [""] * len(row)
-        with st.expander(f"👁️ Voir les {len(df_preview_c)} {_entity_label} tels qu'ils seront envoyés", expanded=False):
-            st.dataframe(_df_final_show.style.apply(_color_final, axis=1), use_container_width=True, hide_index=True)
+        with st.expander(f"👁️ Voir / éditer les {len(df_preview_c)} {_entity_label} tels qu'ils seront envoyés", expanded=False):
+            _final_col_config = {}
+            if "Type *" in _df_final_show.columns:
+                _final_col_config["Type *"] = st.column_config.SelectboxColumn("Type *", options=["Particulier", "Professionnel", "Administration publique"])
+            _final_disabled = ["Source"]
+            _edited_final = st.data_editor(
+                _df_final_show, use_container_width=True, hide_index=True,
+                disabled=_final_disabled, column_config=_final_col_config,
+                key=f"final_recap_{st.session_state.get('meg_editor_ver', 0)}")
             st.caption("🟢 = Nouveau | 🟡 = Doublon (MAJ) | 🔵 = Evoliz seul (MAJ)")
+            # Persister les modifications
+            _final_changed = False
+            for _i in _edited_final.index:
+                for _col in [c for c in _final_cols if c != "Source"]:
+                    if _col in _edited_final.columns and _col in df_preview_c.columns:
+                        _new_v = str(_edited_final.at[_i, _col]).strip() if not pd.isna(_edited_final.at[_i, _col]) else ""
+                        _old_v = to_clean_str(df_preview_c.at[_i, _col]) if not pd.isna(df_preview_c.at[_i, _col]) else ""
+                        if _new_v != _old_v and _new_v:
+                            df_preview_c.at[_i, _col] = _new_v
+                            _final_changed = True
+            if _final_changed:
+                st.session_state["meg_df_clients"] = df_preview_c
 
         # --- Injection ---
         st.divider()
