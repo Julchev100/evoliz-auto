@@ -2547,17 +2547,24 @@ with m_cli:
         # --- CR enrichissement ---
         if st.session_state.get("meg_sirene_stats"):
             stats = st.session_state["meg_sirene_stats"]
-            with st.expander("📋 CR enrichissement Sirene", expanded=False):
-                c1,c2,c3,c4 = st.columns(4)
-                c1.metric("✅ Enrichis", stats["enriched"]); c2.metric("🟰 Complets", stats["already_complete"])
-                c3.metric("🔍 Non trouves", stats["not_found"]); c4.metric("⏭️ Ignores", stats["skipped"])
+            _total_recherches = stats["enriched"] + stats["already_complete"] + stats["not_found"]
+            _pct_found = round(100 * (stats["enriched"] + stats["already_complete"]) / _total_recherches, 1) if _total_recherches else 0
+            st.divider()
+            st.subheader(f"📋 Enrichissement Sirene — {_pct_found}% identifiés")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("✅ Enrichis", stats["enriched"])
+            c2.metric("🟰 Déjà complets", stats["already_complete"])
+            c3.metric("🔍 Non trouvés", stats["not_found"])
+            c4.metric("⏭️ Ignorés", stats["skipped"])
+            c5.metric("📊 % trouvés", f"{_pct_found}%")
+            with st.expander("📋 Détail ligne par ligne", expanded=False):
                 lr = st.session_state.get("meg_sirene_log", [])
                 if lr:
                     df_log = pd.DataFrame(lr)
                     def _cl(row):
                         s = row.get("Statut","")
                         if "Enrichi" in s: return ["background-color:#d4edda"]*len(row)
-                        if "Non trouve" in s: return ["background-color:#fff3cd"]*len(row)
+                        if "Non trouve" in s or "Suggestions" in s: return ["background-color:#fff3cd"]*len(row)
                         if "Erreur" in s or "HTTP" in s: return ["background-color:#f8d7da"]*len(row)
                         return [""]*len(row)
                     st.dataframe(df_log.style.apply(_cl, axis=1), use_container_width=True, hide_index=True)
