@@ -1091,19 +1091,11 @@ with m4:
             for cat, items in orphans_by_cat.items():
                 if items:
                     with st.expander(f"{cat} — {len(items)} orphelins", expanded=False):
-                        # Tout cocher / tout décocher
-                        _all_keys = [(cat, it['id']) for it in items]
-                        _all_checked = all(k not in st.session_state._skip_delete for k in _all_keys)
-                        _toggle = st.checkbox(f"Tout supprimer ({cat})", value=_all_checked, key=f"toggle_del_{cat}")
                         for it in items:
                             _key = (cat, it['id'])
-                            _default = _key not in st.session_state._skip_delete
-                            if _toggle != _all_checked:
-                                # L'utilisateur vient de basculer le toggle global
-                                _default = _toggle
                             _cb = st.checkbox(
-                                f"`{it['Code']}` — {it['Libellé']}",
-                                value=_default,
+                                f"Supprimer `{it['Code']}` — {it['Libellé']}",
+                                value=True,
                                 key=f"cb_del_{cat}_{it['id']}",
                             )
                             if not _cb:
