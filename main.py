@@ -633,43 +633,60 @@ with m2:
     _should_load = _h and _cid and _data_empty
     if _should_load:
         _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
-        with st.spinner("Lecture des données comptables Evoliz..."):
-            st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", _h, company_id=_cid)
-            st.session_state.ev_data_105 = {
-                "ACHAT": fetch_evoliz_data("purchase-classifications", _h, company_id=_cid),
-                "VENTE": fetch_evoliz_data("sale-classifications", _h, company_id=_cid),
-                "ENTRÉE BQ": fetch_evoliz_data("sale-affectations", _h, company_id=_cid),
-                "SORTIE BQ": fetch_evoliz_data("purchase-affectations", _h, company_id=_cid),
-            }
-        with st.spinner("Lecture des clients Evoliz..."):
-            _ev_clients = []; _pg = 1
+
+        def _fetch_paginated(endpoint, headers, params_extra=None):
+            """Lecture paginée d'un endpoint Evoliz (thread-safe)."""
+            out = []; pg = 1
             while True:
-                _r = requests.get(f"{_base}/clients", headers=_h, params={"per_page": 100, "page": _pg}, timeout=15)
-                if _r.status_code != 200: break
-                _d = _r.json(); _ev_clients.extend(_d.get("data", []))
-                if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                _pg += 1
-            st.session_state["ev_clients_raw"] = _ev_clients
-        with st.spinner("Lecture des articles Evoliz..."):
-            _ev_articles = []; _pg = 1
-            while True:
-                _r = requests.get(f"{_base}/articles", headers=_h, params={"per_page": 100, "page": _pg}, timeout=15)
-                if _r.status_code != 200: break
-                _d = _r.json(); _ev_articles.extend(_d.get("data", []))
-                if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                _pg += 1
-            st.session_state["ev_articles_raw"] = _ev_articles
-        with st.spinner("Lecture des factures Evoliz (30 derniers jours)..."):
+                p = {"per_page": 100, "page": pg}
+                if params_extra: p.update(params_extra)
+                r = requests.get(endpoint, headers=headers, params=p, timeout=15)
+                if r.status_code != 200: break
+                d = r.json(); out.extend(d.get("data", []))
+                if pg >= d.get("meta", {}).get("last_page", 1): break
+                pg += 1
+            return out
+
+        with st.spinner("Lecture des données Evoliz (parallèle)..."):
             from datetime import timedelta
             _date_from = (dt_datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-            _ev_invoices = []; _pg = 1
-            while True:
-                _r = requests.get(f"{_base}/invoices", headers=_h, params={"per_page": 100, "page": _pg, "created_after": _date_from}, timeout=15)
-                if _r.status_code != 200: break
-                _d = _r.json(); _ev_invoices.extend(_d.get("data", []))
-                if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                _pg += 1
-            st.session_state["ev_invoices_raw"] = _ev_invoices
+
+            # 8 tâches en parallèle : 5 compta + clients + articles + factures
+            _load_tasks = {
+                "accounts": ("accounts", _h, _cid, None),
+                "purchase-classifications": ("purchase-classifications", _h, _cid, None),
+                "sale-classifications": ("sale-classifications", _h, _cid, None),
+                "sale-affectations": ("sale-affectations", _h, _cid, None),
+                "purchase-affectations": ("purchase-affectations", _h, _cid, None),
+                "clients": (f"{_base}/clients", _h, None, None),
+                "articles": (f"{_base}/articles", _h, None, None),
+                "invoices": (f"{_base}/invoices", _h, None, None),
+            }
+
+            def _run_fetch(key, args):
+                endpoint, headers, cid, extra = args
+                if cid:
+                    return key, fetch_evoliz_data(endpoint, headers, company_id=cid)
+                else:
+                    return key, _fetch_paginated(endpoint, headers, params_extra=extra)
+
+            _results = {}
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {pool.submit(_run_fetch, k, v): k for k, v in _load_tasks.items()}
+                for f in as_completed(futures):
+                    k, data = f.result()
+                    _results[k] = data
+
+            st.session_state.ev_acc_105 = _results.get("accounts", {})
+            st.session_state.ev_data_105 = {
+                "ACHAT": _results.get("purchase-classifications", {}),
+                "VENTE": _results.get("sale-classifications", {}),
+                "ENTRÉE BQ": _results.get("sale-affectations", {}),
+                "SORTIE BQ": _results.get("purchase-affectations", {}),
+            }
+            st.session_state["ev_clients_raw"] = _results.get("clients", [])
+            st.session_state["ev_articles_raw"] = _results.get("articles", [])
+            st.session_state["ev_invoices_raw"] = _results.get("invoices", [])
         _company_name = ""
         for _c in st.session_state.get('companies_list', []):
             if (_c.get('companyid') or _c.get('id')) == _cid:
