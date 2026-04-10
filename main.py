@@ -768,11 +768,20 @@ with m_import:
         st.subheader("🏷️ Comptes TVA pour catégories d'achat")
         options_4456 = ["— Aucun"] + [c['label'] for c in comptes_4456]
 
+        # Présélection par défaut : 1er 44566xxx pour achats, 1er 44562xxx pour immos
+        _default_6 = 0  # "— Aucun"
+        _default_2 = 0
+        for _i, _c in enumerate(comptes_4456):
+            if _c['code'].startswith('44566') and _default_6 == 0:
+                _default_6 = _i + 1  # +1 car "— Aucun" est en position 0
+            if _c['code'].startswith('44562') and _default_2 == 0:
+                _default_2 = _i + 1
+
         col_tva1, col_tva2 = st.columns(2)
         with col_tva1:
-            sel_tva_6 = st.selectbox("TVA Deductible (comptes 6xx)", options_4456, key="sel_tva_6")
+            sel_tva_6 = st.selectbox("TVA Deductible (comptes 6xx)", options_4456, index=_default_6, key="sel_tva_6")
         with col_tva2:
-            sel_tva_2 = st.selectbox("TVA deductible sur immos (comptes 2xx)", options_4456, key="sel_tva_2")
+            sel_tva_2 = st.selectbox("TVA deductible sur immos (comptes 2xx)", options_4456, index=_default_2, key="sel_tva_2")
 
         vat_label_6, vat_label_2 = None, None
         vat_api_id_6, vat_api_id_2 = None, None
