@@ -2525,7 +2525,9 @@ with m_cli:
                                     df_e.at[idx, col] = val; new_sc.add((idx, col))
                             _upd("Siren", siren); _upd("Siret", siret)
                             if siren and "Type *" in df_e.columns:
-                                df_e.at[idx, "Type *"] = "Professionnel"; new_sc.add((idx, "Type *"))
+                                _nj = str(ent.get("nature_juridique", "")).strip()
+                                _new_t = "Administration publique" if _nj and _nj[:1] in ("7", "4") else "Professionnel"
+                                df_e.at[idx, "Type *"] = _new_t; new_sc.add((idx, "Type *"))
                             _upd("APE / NAF", ent.get("activite_principale", ""))
                             _upd("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
                             if siren and "TVA intracommunautaire" in df_e.columns:
@@ -2592,7 +2594,15 @@ with m_cli:
                     if r.status_code == 429: time.sleep(2); r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params={"q":sq,"per_page":5,"page":1}, timeout=10)
                     if r.status_code != 200: log_rows.append({"Client":code,"Nom":nom,"Statut":f"❌ HTTP {r.status_code}","Trouve":"","Detail":sq}); time.sleep(0.15); continue
                     results = r.json().get("results", [])
-                    if not results: not_found_count += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouve","Trouve":"","Detail":sq}); time.sleep(0.15); continue
+                    if not results:
+                        not_found_count += 1
+                        # Non trouvé dans Sirene → Particulier (personne non immatriculée)
+                        if "Type *" in df_e.columns and df_e.at[idx, "Type *"] != "Particulier":
+                            df_e.at[idx, "Type *"] = "Particulier"; new_sc.add((idx, "Type *"))
+                            log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé → Particulier","Trouve":"","Detail":sq})
+                        else:
+                            log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé","Trouve":"","Detail":sq})
+                        time.sleep(0.15); continue
                     # Verifier si le 1er resultat correspond bien (nom normalise similaire)
                     best = results[0]
                     best_name = best.get("nom_complet", best.get("nom_raison_sociale",""))
@@ -2625,9 +2635,16 @@ with m_cli:
                         if col in df_e.columns and val and (not to_clean_str(df_e.at[idx,col]) or to_clean_str(df_e.at[idx,col])=="NC"):
                             df_e.at[idx,col]=val; new_sc.add((idx,col)); champs.append(f"{lbl}={val}")
                     _sc("Siren",siren,"SIREN"); _sc("Siret",siret,"SIRET")
-                    # Si on a un SIREN, c'est forcement un professionnel
-                    if siren and "Type *" in df_e.columns and df_e.at[idx, "Type *"] != "Professionnel":
-                        df_e.at[idx, "Type *"] = "Professionnel"; new_sc.add((idx, "Type *")); champs.append("Type=Professionnel")
+                    # Type basé sur nature_juridique Sirene :
+                    # 7xxx/4xxx = Administration publique, sinon = Professionnel
+                    if siren and "Type *" in df_e.columns:
+                        _nj = str(ent.get("nature_juridique", "")).strip()
+                        if _nj and _nj[:1] in ("7", "4"):
+                            _new_type = "Administration publique"
+                        else:
+                            _new_type = "Professionnel"
+                        if df_e.at[idx, "Type *"] != _new_type:
+                            df_e.at[idx, "Type *"] = _new_type; new_sc.add((idx, "Type *")); champs.append(f"Type={_new_type}")
                     _sc("APE / NAF",ent.get("activite_principale",""),"NAF")
                     _sc("Forme juridique",_normalize_forme_juridique(ent.get("nature_juridique","")),"Forme")
                     if siren and "TVA intracommunautaire" in df_e.columns:
