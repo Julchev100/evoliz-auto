@@ -509,17 +509,24 @@ with m2:
         st.divider()
         st.subheader("📁 Sélection du dossier")
 
-        # Filtre par site (champ home_site dans le détail company)
-        _sites = sorted({c.get('home_site', '') for c in _companies})
+        # Filtre par site (home_site.home_site dans le détail company)
+        def _get_site(c):
+            hs = c.get('home_site')
+            if isinstance(hs, dict):
+                return hs.get('home_site', '')
+            return ''
+        _sites = sorted({_get_site(c) for c in _companies})
         _sites = [s for s in _sites if s]
 
         _filtered = _companies
         if _sites:
             _site_filter = st.selectbox("Filtrer par site", ["— Tous les sites —"] + _sites, key="site_filter")
             if _site_filter != "— Tous les sites —":
-                _filtered = [c for c in _companies if c.get('home_site', '') == _site_filter]
+                _filtered = [c for c in _companies if _get_site(c) == _site_filter]
 
-        _company_names = [f"{c.get('name', 'N/C')} (ID: {c.get('companyid') or c.get('id')})" for c in _filtered]
+        def _get_company_label(c):
+            return c.get('company_name') or c.get('name') or f"Company {c.get('companyid')}"
+        _company_names = [f"{_get_company_label(c)}" for c in _filtered]
         _company_ids = [c.get('companyid') or c.get('id') for c in _filtered]
         _prev_cid = st.session_state.company_id_105
         _sel_idx = st.selectbox("Dossier Evoliz", range(len(_company_names)),
@@ -543,7 +550,7 @@ with m2:
     if _cid and _companies:
         _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
         if _current:
-            st.info(f"📂 Dossier actif : **{_current.get('name', 'N/C')}** (ID: {_cid})")
+            st.info(f"📂 Dossier actif : **{_get_company_label(_current)}** (ID: {_cid})")
 
     # --- Bloc 3 : Chargement des données ---
     _is_multi = len(st.session_state.get('companies_list', [])) > 1
