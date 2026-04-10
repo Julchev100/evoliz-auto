@@ -2560,6 +2560,119 @@ with m_cli:
                         return [""]*len(row)
                     st.dataframe(df_log.style.apply(_cl, axis=1), use_container_width=True, hide_index=True)
 
+        # --- 1ère lame : enrichissement Sirene par nom ---
+        st.divider()
+        if st.button("🔍 1ère lame — Enrichir via Sirene", type="primary", use_container_width=True, key="btn_sirene"):
+            st.session_state["meg_enrichir_flags"] = {}
+            df_e = df_preview_c.copy()
+            enriched = skipped = already_complete = not_found_count = 0
+            log_rows = []; new_sc = set(sirene_cells); new_si = dict(sirene_info)
+            _tasks = []
+            for idx in df_e.index:
+                nom = str(df_e.at[idx, "Societe / Nom *"]).strip() if "Societe / Nom *" in df_e.columns else ""
+                type_c = str(df_e.at[idx, "Type *"]).strip() if "Type *" in df_e.columns else ""
+                code = str(df_e.at[idx, "Code *"]).strip() if "Code *" in df_e.columns else ""
+                if not nom:
+                    skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Vide","Trouve":"","Detail":""}); continue
+                # Skip Particulier UNIQUEMENT si identifié comme tel par le fichier source (pas par défaut)
+                _was_typed_by_file = type_c == "Particulier" and (idx, "Type *") not in sirene_cells
+                if _was_typed_by_file:
+                    skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Part. (fichier)","Trouve":"","Detail":""}); continue
+                _has_siren = bool(to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else "")
+                _has_siret = bool(to_clean_str(df_e.at[idx, "Siret"]) if "Siret" in df_e.columns else "")
+                _has_cp = bool(to_clean_str(df_e.at[idx, "Code postal *"]) not in ("", "NC") if "Code postal *" in df_e.columns else False)
+                _has_ville = bool(to_clean_str(df_e.at[idx, "Ville *"]) not in ("", "NC") if "Ville *" in df_e.columns else False)
+                if _has_siren and _has_siret and _has_cp and _has_ville:
+                    already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":"","Detail":""}); continue
+                _existing_siren = to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else ""
+                if _existing_siren and len(_existing_siren) >= 9 and _existing_siren.isdigit():
+                    _tasks.append((idx, _existing_siren, code, nom, "siren"))
+                else:
+                    sq = " ".join(nom.replace("nan","").split()).strip()
+                    if sq: _tasks.append((idx, sq, code, nom, "nom"))
+                    else: skipped += 1; continue
+
+            def _search_sirene(task):
+                idx, query, code, nom, mode = task
+                params = {"q": query, "per_page": 1 if mode == "siren" else 5, "page": 1}
+                try:
+                    r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=10)
+                    if r.status_code == 429: time.sleep(2); r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=10)
+                    return (idx, code, nom, mode, query, r.status_code, r.json() if r.status_code == 200 else None)
+                except Exception as exc:
+                    return (idx, code, nom, mode, query, -1, str(exc))
+
+            progress = st.progress(0, text="1ère lame — Recherche Sirene...")
+            _results_list = []
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_search_sirene, t): t for t in _tasks}
+                for _n, f in enumerate(as_completed(futures)):
+                    _results_list.append(f.result())
+                    if _tasks: progress.progress((_n + 1) / len(_tasks), text=f"{_n + 1}/{len(_tasks)}")
+
+            for idx, code, nom, mode, query, status, data in _results_list:
+                if status == -1:
+                    log_rows.append({"Client":code,"Nom":nom,"Statut":"❌ Erreur","Trouve":"","Detail":str(data)[:60]}); continue
+                if status != 200:
+                    log_rows.append({"Client":code,"Nom":nom,"Statut":f"❌ HTTP {status}","Trouve":"","Detail":query}); continue
+                results = data.get("results", []) if data else []
+                if not results:
+                    not_found_count += 1
+                    if "Type *" in df_e.columns and df_e.at[idx, "Type *"] != "Particulier":
+                        df_e.at[idx, "Type *"] = "Particulier"; new_sc.add((idx, "Type *"))
+                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé → Particulier","Trouve":"","Detail":query})
+                    else:
+                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé","Trouve":"","Detail":query})
+                    continue
+                best = results[0]
+                best_name = best.get("nom_complet", best.get("nom_raison_sociale",""))
+                if mode == "nom":
+                    nom_n = norm_piv(nom); best_n = norm_piv(best_name)
+                    auto_match = (nom_n == best_n or nom_n in best_n or best_n in nom_n
+                                  or (len(nom_n) > 3 and len(best_n) > 3 and
+                                      len(set(nom_n) & set(best_n)) / max(len(set(nom_n)), len(set(best_n))) > 0.6))
+                    if not auto_match:
+                        not_found_count += 1
+                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé (pas de match)","Trouve":best_name,"Detail":query})
+                        continue
+                ent = best; siege = ent.get("siege",{}); siren = ent.get("siren",""); siret = siege.get("siret","")
+                nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale",""))
+                new_si[idx] = {"nom": nom_t or "", "activite": _naf_label(siege.get("activite_principale", ent.get("activite_principale",""))), "ville": siege.get("libelle_commune","")}
+                champs = []
+                def _sc(col, val, lbl, _idx=idx):
+                    if col in df_e.columns and val and (not to_clean_str(df_e.at[_idx,col]) or to_clean_str(df_e.at[_idx,col])=="NC"):
+                        df_e.at[_idx,col]=val; new_sc.add((_idx,col)); champs.append(f"{lbl}={val}")
+                _sc("Siren",siren,"SIREN"); _sc("Siret",siret,"SIRET")
+                if siren and "Type *" in df_e.columns:
+                    _nj = str(ent.get("nature_juridique", "")).strip()
+                    if _nj and _nj[:1] in ("7", "1"): _new_type = "Administration publique"
+                    elif _nj and _nj[:1] == "9": _new_type = "Particulier"
+                    else: _new_type = "Professionnel"
+                    if df_e.at[idx, "Type *"] != _new_type:
+                        df_e.at[idx, "Type *"] = _new_type; new_sc.add((idx, "Type *")); champs.append(f"Type={_new_type}")
+                _sc("APE / NAF",ent.get("activite_principale",""),"NAF")
+                _sc("Forme juridique",_normalize_forme_juridique(ent.get("nature_juridique","")),"Forme")
+                if siren and "TVA intracommunautaire" in df_e.columns:
+                    cur = to_clean_str(df_e.at[idx,"TVA intracommunautaire"])
+                    if not cur or cur=="NC":
+                        tv = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"; df_e.at[idx,"TVA intracommunautaire"]=tv; new_sc.add((idx,"TVA intracommunautaire")); champs.append(f"TVA={tv}")
+                if not to_clean_str(df_e.at[idx,"Adresse"]) if "Adresse" in df_e.columns else True:
+                    pts = [siege.get("numero_voie",""),siege.get("type_voie",""),siege.get("libelle_voie","")]
+                    a = " ".join(p for p in pts if p)
+                    if a and "Adresse" in df_e.columns: df_e.at[idx,"Adresse"]=a; new_sc.add((idx,"Adresse")); champs.append(f"Adr={a[:25]}")
+                _sc("Code postal *",siege.get("code_postal",""),"CP"); _sc("Ville *",siege.get("libelle_commune",""),"Ville")
+                if champs: enriched += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"✅ Enrichi","Trouve":nom_t,"Detail":", ".join(champs)})
+                else: already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":nom_t,"Detail":""})
+
+            progress.empty()
+            st.session_state["meg_df_clients"] = df_e; st.session_state["meg_sirene_cells"] = new_sc; st.session_state["meg_sirene_info"] = new_si
+            st.session_state["meg_sirene_log"] = log_rows; st.session_state["meg_sirene_stats"] = {"enriched":enriched,"already_complete":already_complete,"not_found":not_found_count,"skipped":skipped}
+            wb_n, ws_n = _make_wb(_H_ENTITY)
+            for _, rw in df_e.iterrows(): ws_n.append([rw.iloc[i] if not pd.isna(rw.iloc[i]) else None for i in range(len(rw))])
+            with open(GABARIT_CLIENT_PATH,"wb") as f: f.write(_wb_bytes(wb_n))
+            st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver",0)+1
+            st.rerun()
+
         # --- 2ème lame : propositions Sirene pour les non trouvés ---
         _non_enrichis = []
         if "Societe / Nom *" in df_preview_c.columns:
@@ -2759,143 +2872,6 @@ with m_cli:
             # Afficher le résultat persistant
             if st.session_state.get("_3eme_lame_result"):
                 st.success(st.session_state["_3eme_lame_result"])
-
-        # --- Enrichissement SIRENE (1ère lame — par nom ou SIREN existant) ---
-        st.divider()
-        enrich_all = st.checkbox("Inclure aussi les Particuliers", value=False, key="sirene_all")
-        if st.button("🔍 Enrichir via Sirene", use_container_width=True, key="btn_sirene"):
-            st.session_state["meg_enrichir_flags"] = {}
-            df_e = df_preview_c.copy()
-            enriched = skipped = already_complete = not_found_count = 0
-            log_rows = []; new_sc = set(sirene_cells); new_si = dict(sirene_info)
-
-            # Préparer les tâches (idx, query, mode)
-            _tasks = []
-            for idx in df_e.index:
-                nom = str(df_e.at[idx, "Societe / Nom *"]).strip() if "Societe / Nom *" in df_e.columns else ""
-                type_c = str(df_e.at[idx, "Type *"]).strip() if "Type *" in df_e.columns else ""
-                code = str(df_e.at[idx, "Code *"]).strip() if "Code *" in df_e.columns else ""
-                if not nom:
-                    skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Vide","Trouve":"","Detail":""}); continue
-                if type_c == "Particulier" and not enrich_all:
-                    skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Part.","Trouve":"","Detail":""}); continue
-                # Skip si déjà complet (Siren + Siret + CP + Ville renseignés)
-                _has_siren = bool(to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else "")
-                _has_siret = bool(to_clean_str(df_e.at[idx, "Siret"]) if "Siret" in df_e.columns else "")
-                _has_cp = bool(to_clean_str(df_e.at[idx, "Code postal *"]) not in ("", "NC") if "Code postal *" in df_e.columns else False)
-                _has_ville = bool(to_clean_str(df_e.at[idx, "Ville *"]) not in ("", "NC") if "Ville *" in df_e.columns else False)
-                if _has_siren and _has_siret and _has_cp and _has_ville:
-                    already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":"","Detail":""}); continue
-                # Chercher par SIREN si disponible (plus rapide + exact), sinon par nom
-                _existing_siren = to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else ""
-                if _existing_siren and len(_existing_siren) >= 9 and _existing_siren.isdigit():
-                    _tasks.append((idx, _existing_siren, code, nom, "siren"))
-                else:
-                    sq = " ".join(nom.replace("nan","").split()).strip()
-                    if sq:
-                        _tasks.append((idx, sq, code, nom, "nom"))
-                    else:
-                        skipped += 1; continue
-
-            # Fonction de recherche (appelée en parallèle)
-            def _search_sirene(task):
-                idx, query, code, nom, mode = task
-                params = {"q": query, "per_page": 1 if mode == "siren" else 5, "page": 1}
-                try:
-                    r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=10)
-                    if r.status_code == 429:
-                        time.sleep(2)
-                        r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=10)
-                    return (idx, code, nom, mode, query, r.status_code, r.json() if r.status_code == 200 else None)
-                except Exception as exc:
-                    return (idx, code, nom, mode, query, -1, str(exc))
-
-            # Exécution parallèle (5 workers)
-            progress = st.progress(0, text="Recherche Sirene...")
-            _results_list = []
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = {pool.submit(_search_sirene, t): t for t in _tasks}
-                for _n, f in enumerate(as_completed(futures)):
-                    _results_list.append(f.result())
-                    progress.progress((_n + 1) / len(_tasks), text=f"{_n + 1}/{len(_tasks)}")
-
-            # Traiter les résultats (séquentiel — modification du DataFrame)
-            for idx, code, nom, mode, query, status, data in _results_list:
-                if status == -1:
-                    log_rows.append({"Client":code,"Nom":nom,"Statut":"❌ Erreur","Trouve":"","Detail":str(data)[:60]}); continue
-                if status != 200:
-                    log_rows.append({"Client":code,"Nom":nom,"Statut":f"❌ HTTP {status}","Trouve":"","Detail":query}); continue
-                results = data.get("results", []) if data else []
-                if not results:
-                    not_found_count += 1
-                    if "Type *" in df_e.columns and df_e.at[idx, "Type *"] != "Particulier":
-                        df_e.at[idx, "Type *"] = "Particulier"; new_sc.add((idx, "Type *"))
-                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé → Particulier","Trouve":"","Detail":query})
-                    else:
-                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔍 Non trouvé","Trouve":"","Detail":query})
-                    continue
-                best = results[0]
-                best_name = best.get("nom_complet", best.get("nom_raison_sociale",""))
-                # En mode SIREN, toujours accepter le match. En mode nom, vérifier la similarité.
-                if mode == "nom":
-                    nom_n = norm_piv(nom); best_n = norm_piv(best_name)
-                    auto_match = (nom_n == best_n or nom_n in best_n or best_n in nom_n
-                                  or (len(nom_n) > 3 and len(best_n) > 3 and
-                                      len(set(nom_n) & set(best_n)) / max(len(set(nom_n)), len(set(best_n))) > 0.6))
-                    if not auto_match:
-                        suggestions = []
-                        for res in results[:5]:
-                            rn = res.get("nom_complet", res.get("nom_raison_sociale",""))
-                            rs = res.get("siren","")
-                            rsie = (res.get("siege") or {})
-                            suggestions.append({"nom": rn, "siren": rs, "ville": rsie.get("libelle_commune",""), "activite": _naf_label(rsie.get("activite_principale","")), "_raw": res})
-                        if not st.session_state.get("meg_sirene_suggestions"):
-                            st.session_state["meg_sirene_suggestions"] = {}
-                        st.session_state["meg_sirene_suggestions"][idx] = {"client": nom, "code": code, "search": query, "suggestions": suggestions}
-                        not_found_count += 1
-                        log_rows.append({"Client":code,"Nom":nom,"Statut":"🔎 Suggestions","Trouve":f"{len(suggestions)} proposition(s)","Detail":"; ".join(s['nom'] for s in suggestions[:3])})
-                        continue
-                # Appliquer l'enrichissement
-                ent = best; siege = ent.get("siege",{}); siren = ent.get("siren",""); siret = siege.get("siret","")
-                nom_t = ent.get("nom_complet", ent.get("nom_raison_sociale",""))
-                new_si[idx] = {"nom": nom_t or "", "activite": _naf_label(siege.get("activite_principale", ent.get("activite_principale",""))), "ville": siege.get("libelle_commune","")}
-                champs = []
-                def _sc(col, val, lbl, _idx=idx):
-                    if col in df_e.columns and val and (not to_clean_str(df_e.at[_idx,col]) or to_clean_str(df_e.at[_idx,col])=="NC"):
-                        df_e.at[_idx,col]=val; new_sc.add((_idx,col)); champs.append(f"{lbl}={val}")
-                _sc("Siren",siren,"SIREN"); _sc("Siret",siret,"SIRET")
-                if siren and "Type *" in df_e.columns:
-                    _nj = str(ent.get("nature_juridique", "")).strip()
-                    if _nj and _nj[:1] in ("7", "1"):
-                        _new_type = "Administration publique"
-                    elif _nj and _nj[:1] == "9":
-                        _new_type = "Particulier"
-                    else:
-                        _new_type = "Professionnel"
-                    if df_e.at[idx, "Type *"] != _new_type:
-                        df_e.at[idx, "Type *"] = _new_type; new_sc.add((idx, "Type *")); champs.append(f"Type={_new_type}")
-                _sc("APE / NAF",ent.get("activite_principale",""),"NAF")
-                _sc("Forme juridique",_normalize_forme_juridique(ent.get("nature_juridique","")),"Forme")
-                if siren and "TVA intracommunautaire" in df_e.columns:
-                    cur = to_clean_str(df_e.at[idx,"TVA intracommunautaire"])
-                    if not cur or cur=="NC":
-                        tv = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"; df_e.at[idx,"TVA intracommunautaire"]=tv; new_sc.add((idx,"TVA intracommunautaire")); champs.append(f"TVA={tv}")
-                if not to_clean_str(df_e.at[idx,"Adresse"]) if "Adresse" in df_e.columns else True:
-                    pts = [siege.get("numero_voie",""),siege.get("type_voie",""),siege.get("libelle_voie","")]
-                    a = " ".join(p for p in pts if p)
-                    if a and "Adresse" in df_e.columns: df_e.at[idx,"Adresse"]=a; new_sc.add((idx,"Adresse")); champs.append(f"Adr={a[:25]}")
-                _sc("Code postal *",siege.get("code_postal",""),"CP"); _sc("Ville *",siege.get("libelle_commune",""),"Ville")
-                if champs: enriched += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"✅ Enrichi","Trouve":nom_t,"Detail":", ".join(champs)})
-                else: already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":nom_t,"Detail":""})
-
-            progress.empty()
-            st.session_state["meg_df_clients"] = df_e; st.session_state["meg_sirene_cells"] = new_sc; st.session_state["meg_sirene_info"] = new_si
-            st.session_state["meg_sirene_log"] = log_rows; st.session_state["meg_sirene_stats"] = {"enriched":enriched,"already_complete":already_complete,"not_found":not_found_count,"skipped":skipped}
-            wb_n, ws_n = _make_wb(_H_ENTITY)
-            for _, rw in df_e.iterrows(): ws_n.append([rw.iloc[i] if not pd.isna(rw.iloc[i]) else None for i in range(len(rw))])
-            with open(GABARIT_CLIENT_PATH,"wb") as f: f.write(_wb_bytes(wb_n))
-            st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver",0)+1
-            st.rerun()
 
         # --- Suggestions Sirene (clients non trouves automatiquement) ---
         suggestions = st.session_state.get("meg_sirene_suggestions", {})
