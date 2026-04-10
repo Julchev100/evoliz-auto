@@ -333,51 +333,25 @@ with m_import:
     st.subheader("📁 Import des fichiers sources")
     st.caption("Centralisez ici tous vos fichiers. Ils seront utilises dans les onglets correspondants.")
 
+    # Layout compact : label | browse | statut sur la même ligne
+    def _file_row(label, types, session_key, uploader_key):
+        c1, c2, c3 = st.columns([1.5, 4, 1.5])
+        c1.markdown(f"**{label}**")
+        _f = c2.file_uploader(label, type=types, key=uploader_key, label_visibility="collapsed")
+        if _f: st.session_state[session_key] = _f
+        loaded = st.session_state.get(session_key)
+        c3.markdown(f"✅ {loaded.name}" if loaded else "❌ —")
+
     if mod_compta:
-        st.markdown("---")
-        st.markdown("#### 📂 Comptabilite")
-        _f_balance = st.file_uploader("Fichier Balance", type=["xlsm", "xlsx", "xls"], key="imp_balance")
-        if _f_balance: st.session_state["imp_file_balance"] = _f_balance
-
+        _file_row("📂 Balance", ["xlsm", "xlsx", "xls"], "imp_file_balance", "imp_balance")
     if mod_clients:
-        st.markdown("---")
-        st.markdown("#### 👥 Clients")
-        _f_clients = st.file_uploader("Fichier clients (Excel, CSV...)", type=["xlsx", "xls", "csv"], key="imp_clients")
-        if _f_clients: st.session_state["imp_file_clients"] = _f_clients
-
+        _file_row("👥 Clients", ["xlsx", "xls", "csv"], "imp_file_clients", "imp_clients")
     if mod_fournisseurs:
-        st.markdown("---")
-        st.markdown("#### 🏭 Fournisseurs")
-        _f_fournisseurs = st.file_uploader("Fichier fournisseurs (Excel, CSV...)", type=["xlsx", "xls", "csv"], key="imp_fournisseurs")
-        if _f_fournisseurs: st.session_state["imp_file_fournisseurs"] = _f_fournisseurs
-
+        _file_row("🏭 Fournisseurs", ["xlsx", "xls", "csv"], "imp_file_fournisseurs", "imp_fournisseurs")
     if mod_factures:
-        st.markdown("---")
-        st.markdown("#### 🧾 Factures")
-        _f_factures = st.file_uploader("Fichier export factures", type=["xlsx", "xls"], key="imp_factures")
-        if _f_factures: st.session_state["imp_file_factures"] = _f_factures
-
+        _file_row("🧾 Factures", ["xlsx", "xls"], "imp_file_factures", "imp_factures")
     if mod_articles:
-        st.markdown("---")
-        st.markdown("#### 📦 Articles")
-        _f_articles = st.file_uploader("Fichier export articles", type=["xlsx", "xls"], key="imp_articles")
-        if _f_articles: st.session_state["imp_file_articles"] = _f_articles
-
-    # Resume des fichiers charges
-    st.markdown("---")
-    st.markdown("#### 📋 Fichiers charges")
-    _files_status = []
-    if mod_compta:
-        _files_status.append({"Fichier": "📂 Balance", "Statut": "✅ Charge" if st.session_state.get("imp_file_balance") else "❌ Non charge"})
-    if mod_clients:
-        _files_status.append({"Fichier": "👥 Clients", "Statut": "✅ Charge" if st.session_state.get("imp_file_clients") else "❌ Non charge"})
-    if mod_fournisseurs:
-        _files_status.append({"Fichier": "🏭 Fournisseurs", "Statut": "✅ Charge" if st.session_state.get("imp_file_fournisseurs") else "❌ Non charge"})
-    if mod_factures:
-        _files_status.append({"Fichier": "🧾 Factures", "Statut": "✅ Charge" if st.session_state.get("imp_file_factures") else "❌ Non charge"})
-    if mod_articles:
-        _files_status.append({"Fichier": "📦 Articles", "Statut": "✅ Charge" if st.session_state.get("imp_file_articles") else "❌ Non charge"})
-    st.dataframe(pd.DataFrame(_files_status), use_container_width=True, hide_index=True)
+        _file_row("📦 Articles", ["xlsx", "xls"], "imp_file_articles", "imp_articles")
 
 
 def load_param_from_excel(file_obj):
