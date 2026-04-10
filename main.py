@@ -380,17 +380,29 @@ with m_import:
     # Layout compact : label | browse | statut sur la même ligne
     # + sélection d'onglet automatique si fichier multi-feuilles
     def _file_row(label, types, session_key, uploader_key):
-        c1, c2, c3 = st.columns([1.5, 4, 1.5])
+        _f_uploaded = st.session_state.get(session_key)
+        # Détecter les onglets du fichier déjà chargé pour dimensionner la ligne
+        _sheets = _get_sheet_names(_f_uploaded) if _f_uploaded else None
+        _has_sheets = _sheets and len(_sheets) > 1
+        if _has_sheets:
+            c1, c2, c3, c4 = st.columns([1.2, 3, 1.8, 1.2])
+        else:
+            c1, c2, c3 = st.columns([1.5, 4, 1.5])
         c1.markdown(f"**{label}**")
         _f = c2.file_uploader(label, type=types, key=uploader_key, label_visibility="collapsed")
-        if _f: st.session_state[session_key] = _f
-        loaded = st.session_state.get(session_key)
-        c3.markdown(f"✅ {loaded.name}" if loaded else "❌ —")
-        # Si fichier multi-onglets, proposer le sélecteur ici
-        if loaded:
+        if _f: st.session_state[session_key] = _f; _f_uploaded = _f
+        if _has_sheets:
             _sheet_key = f"_sheet_{session_key}"
-            _chosen = _sheet_selector(loaded, label, _sheet_key)
+            _chosen = c3.selectbox(f"Onglet", _sheets, key=_sheet_key, label_visibility="collapsed")
+            if _chosen and str(_chosen).startswith("Feuille "):
+                try: _chosen = int(_chosen.split(" ")[1]) - 1
+                except Exception: pass
             st.session_state[f"{session_key}_sheet"] = _chosen
+            c4.markdown(f"✅ {_f_uploaded.name}" if _f_uploaded else "❌ —")
+        else:
+            c3.markdown(f"✅ {_f_uploaded.name}" if _f_uploaded else "❌ —")
+            if _f_uploaded:
+                st.session_state[f"{session_key}_sheet"] = 0
 
     if mod_compta:
         _file_row("📂 Balance", ["xlsm", "xlsx", "xls"], "imp_file_balance", "imp_balance")
