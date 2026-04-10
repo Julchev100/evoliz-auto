@@ -328,6 +328,47 @@ _has_fournisseurs_tab = "fournisseurs" in _tab_map
 _has_factures_tab = "factures" in _tab_map
 _has_articles_tab = "articles" in _tab_map
 
+def _get_sheet_names(f):
+    """Retourne la liste des onglets d'un fichier Excel, ou None si CSV/mono-feuille HTML."""
+    if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
+        return None
+    fname = getattr(f, 'name', '').lower()
+    if fname.endswith('.xls'):
+        engines = ["xlrd", None]
+    elif fname.endswith(('.xlsx', '.xlsm')):
+        engines = ["openpyxl", None]
+    else:
+        engines = [None, "openpyxl", "xlrd"]
+    for engine in engines:
+        try:
+            f.seek(0)
+            xl = pd.ExcelFile(f, engine=engine)
+            return xl.sheet_names
+        except Exception:
+            pass
+    # Fallback : certains .xls sont du HTML déguisé
+    try:
+        f.seek(0)
+        raw = f.read() if hasattr(f, 'read') else open(f, 'rb').read()
+        f.seek(0)
+        dfs = pd.read_html(raw, header=0)
+        if dfs and len(dfs) > 1:
+            return [f"Feuille {i+1}" for i in range(len(dfs))]
+    except Exception:
+        pass
+    return None
+
+def _sheet_selector(f, label, key):
+    """Si le fichier a plusieurs onglets, affiche un selectbox et retourne le nom choisi."""
+    sheets = _get_sheet_names(f)
+    if sheets and len(sheets) > 1:
+        chosen = st.selectbox(f"📑 Onglet à utiliser ({label})", sheets, key=key)
+        if chosen.startswith("Feuille "):
+            try: return int(chosen.split(" ")[1]) - 1
+            except Exception: pass
+        return chosen
+    return 0
+
 # --- Onglet Import fichiers centralise ---
 with m_import:
     st.subheader("📁 Import des fichiers sources")
@@ -1668,50 +1709,6 @@ def _read_meg(f, sheet_name=0):
             return dfs[idx] if idx < len(dfs) else dfs[0]
     except Exception: pass
     raise ValueError("Impossible de lire ce fichier.")
-
-def _get_sheet_names(f):
-    """Retourne la liste des onglets d'un fichier Excel, ou None si CSV/mono-feuille HTML."""
-    if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
-        return None
-    fname = getattr(f, 'name', '').lower()
-    if fname.endswith('.xls'):
-        engines = ["xlrd", None]
-    elif fname.endswith(('.xlsx', '.xlsm')):
-        engines = ["openpyxl", None]
-    else:
-        engines = [None, "openpyxl", "xlrd"]
-    for engine in engines:
-        try:
-            f.seek(0)
-            xl = pd.ExcelFile(f, engine=engine)
-            return xl.sheet_names
-        except Exception:
-            pass
-    # Fallback : certains .xls sont du HTML déguisé → une seule "feuille"
-    try:
-        f.seek(0)
-        raw = f.read() if hasattr(f, 'read') else open(f, 'rb').read()
-        f.seek(0)
-        dfs = pd.read_html(raw, header=0)
-        if dfs and len(dfs) > 1:
-            return [f"Feuille {i+1}" for i in range(len(dfs))]
-    except Exception:
-        pass
-    return None
-
-def _sheet_selector(f, label, key):
-    """Si le fichier a plusieurs onglets, affiche un selectbox et retourne le nom choisi.
-    Si un seul onglet ou CSV, retourne 0 (premier onglet par défaut).
-    Pour les fichiers HTML déguisés en .xls, retourne l'index numérique."""
-    sheets = _get_sheet_names(f)
-    if sheets and len(sheets) > 1:
-        chosen = st.selectbox(f"📑 Onglet à utiliser ({label})", sheets, key=key)
-        # Si c'est un nom "Feuille N" (HTML fallback), retourner l'index
-        if chosen.startswith("Feuille "):
-            try: return int(chosen.split(" ")[1]) - 1
-            except Exception: pass
-        return chosen
-    return 0
 
 def _safe_float(v):
     try: return float(v)
