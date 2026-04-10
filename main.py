@@ -2254,58 +2254,55 @@ with m_cli:
 
         st.session_state["meg_col_mapping_final"] = mapping
 
-    # --- Etape 2 : Consolidation fichier + Evoliz ---
+    # --- Etape 2 : Consolidation fichier (+ Evoliz si connecté) ---
     has_api = bool(st.session_state.get("token_headers_105"))
-    if f_meg_cli and has_api:
-        # Auto-consolidation si nouveau fichier ou bouton manuel
-        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size)
+    if f_meg_cli:
+        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size) + ("_api" if has_api else "_noapi")
         _already_consolidated = st.session_state.get("meg_consol_file_id") == _cli_file_id
-        _auto_run = f_meg_cli and not _already_consolidated
-        _manual_run = st.button("🔄 Re-consolider avec Evoliz", use_container_width=True, key="btn_consolider")
+        _auto_run = not _already_consolidated
+        _manual_run = st.button("🔄 Re-consolider" + (" avec Evoliz" if has_api else ""), use_container_width=True, key="btn_consolider")
         if _auto_run or _manual_run:
             st.session_state["meg_consol_file_id"] = _cli_file_id
             with st.spinner("Consolidation en cours..."):
                 mapping = st.session_state.get("meg_col_mapping_final", {})
-                headers = st.session_state.token_headers_105
-                cid = st.session_state.company_id_105
-                if not cid:
-                    st.error("Aucun dossier sélectionné. Retournez dans l'onglet Connexion API.")
-                    st.stop()
+                headers = st.session_state.token_headers_105 if has_api else None
+                cid = st.session_state.company_id_105 if has_api else None
 
                 def _get(row, field):
                     col = mapping.get(field)
                     if not col or col == "— Ignorer" or col not in df_src.columns: return ""
                     return to_clean_str(row.get(col, ""))
 
-                # Lire les entités Evoliz (clients ou fournisseurs)
+                # Lire les entités Evoliz (clients ou fournisseurs) — seulement si API connectée
                 ev_clients = []; ev_by_name = {}; ev_by_siren = {}
-                url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}" if cid else f"https://www.evoliz.io/api/v1/{_entity_api}"
-                page = 1
-                while True:
-                    r = requests.get(url_cli, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
-                    if r.status_code != 200: break
-                    d = r.json()
-                    for it in d.get("data", []):
-                        adr = it.get("address") or {}
-                        entry = {
-                            _entity_id_field: it.get(_entity_id_field), "code": (it.get("code") or "").strip(),
-                            "name": (it.get("name") or "").strip(), "type": (it.get("type") or ""),
-                            "vat_number": (it.get("vat_number") or ""), "business_number": (it.get("business_number") or ""),
-                            "business_identification_number": (it.get("business_identification_number") or ""),
-                            "legalform": (it.get("legal_status") or {}).get("label", "") if isinstance(it.get("legal_status"), dict) else "",
-                            "activity_number": (it.get("activity_number") or ""),
-                            "phone": (it.get("phone") or ""), "mobile": (it.get("mobile") or ""),
-                            "fax": (it.get("fax") or ""), "website": (it.get("website") or ""),
-                            "addr": (adr.get("addr") or ""), "postcode": (adr.get("postcode") or ""),
-                            "town": (adr.get("town") or ""), "iso2": (adr.get("iso2") or ""),
-                        }
-                        ev_clients.append(entry)
-                        n = norm_piv(entry["name"])
-                        if n: ev_by_name[n] = entry
-                        s = entry.get("business_identification_number", "").strip()
-                        if s and s != "N/C": ev_by_siren[s] = entry
-                    if page >= d.get("meta", {}).get("last_page", 1): break
-                    page += 1
+                if headers and cid:
+                    url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}"
+                    page = 1
+                    while True:
+                        r = requests.get(url_cli, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
+                        if r.status_code != 200: break
+                        d = r.json()
+                        for it in d.get("data", []):
+                            adr = it.get("address") or {}
+                            entry = {
+                                _entity_id_field: it.get(_entity_id_field), "code": (it.get("code") or "").strip(),
+                                "name": (it.get("name") or "").strip(), "type": (it.get("type") or ""),
+                                "vat_number": (it.get("vat_number") or ""), "business_number": (it.get("business_number") or ""),
+                                "business_identification_number": (it.get("business_identification_number") or ""),
+                                "legalform": (it.get("legal_status") or {}).get("label", "") if isinstance(it.get("legal_status"), dict) else "",
+                                "activity_number": (it.get("activity_number") or ""),
+                                "phone": (it.get("phone") or ""), "mobile": (it.get("mobile") or ""),
+                                "fax": (it.get("fax") or ""), "website": (it.get("website") or ""),
+                                "addr": (adr.get("addr") or ""), "postcode": (adr.get("postcode") or ""),
+                                "town": (adr.get("town") or ""), "iso2": (adr.get("iso2") or ""),
+                            }
+                            ev_clients.append(entry)
+                            n = norm_piv(entry["name"])
+                            if n: ev_by_name[n] = entry
+                            s = entry.get("business_identification_number", "").strip()
+                            if s and s != "N/C": ev_by_siren[s] = entry
+                        if page >= d.get("meta", {}).get("last_page", 1): break
+                        page += 1
 
                 # Construire la liste consolidee
                 ci = {h.split(" *")[0]: i for i, h in enumerate(_H_ENTITY)}
@@ -2400,8 +2397,8 @@ with m_cli:
                 for _k in ["meg_sirene_cells","meg_sirene_info","meg_sirene_log","meg_sirene_stats","meg_enrichir_flags","meg_sirene_suggestions"]:
                     st.session_state[_k] = set() if "cells" in _k else ({} if "info" in _k or "flags" in _k else ([] if "log" in _k else None))
                 st.rerun()
-    elif f_meg_cli and not has_api:
-        st.warning("Connectez-vous a l'API Evoliz (onglet Balance & Cles API) pour consolider.")
+    if f_meg_cli and not has_api and st.session_state.get("meg_df_clients") is not None:
+        st.info("Connectez-vous à l'API Evoliz pour détecter les doublons et injecter.")
 
     # --- Init session ---
     for _k, _d in [("meg_sirene_cells", set()), ("meg_sirene_log", []), ("meg_sirene_stats", None),
