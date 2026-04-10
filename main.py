@@ -2257,7 +2257,9 @@ with m_cli:
     # --- Etape 2 : Consolidation fichier (+ Evoliz si connecté) ---
     has_api = bool(st.session_state.get("token_headers_105"))
     if f_meg_cli:
-        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size)
+        # L'ID inclut le mapping pour re-consolider automatiquement quand il change
+        _mapping_sig = str(sorted(mapping.items())) if mapping else ""
+        _cli_file_id = f_meg_cli.name + str(f_meg_cli.size) + _mapping_sig
         _file_changed = st.session_state.get("meg_consol_file_id") != _cli_file_id
         _no_data = st.session_state.get("meg_df_clients") is None
         _auto_run = _file_changed or _no_data
