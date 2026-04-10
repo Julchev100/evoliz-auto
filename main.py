@@ -35,13 +35,33 @@ def norm_piv(s):
 def clean_label_tva(label, code, do_fusion=True):
     if do_fusion and str(code).startswith(('2', '6', '7')):
         s = str(label)
-        # Supprimer les taux de TVA (20%, 5,5 %, etc.) avec les signes autour (tirets, parenthèses, slashes)
+        # 1. Supprimer les taux de TVA (20%, 5,5 %, 10.0%, etc.) avec les signes autour
         s = re.sub(r'[\s\-/\(]*\d+[\.,]?\d*\s?%[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
-        # Supprimer les mentions TVA, EXONERE, EXO avec les signes autour
-        s = re.sub(r'[\s\-/\(]*(TVA|EXON[ÉEée]R[ÉEée][EeSs]?|EXO)[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
-        # Supprimer les mots résiduels type EX... en fin de chaîne
+        # 2. Supprimer les mentions TVA et variantes :
+        #    TVA, EXONERE, EXO, EXOTVA, INTRA, INTRACOM, INTRACOMMUNAUTAIRE, IC,
+        #    AUTOLIQUIDATION, AUTOLIQ, REVERSE CHARGE, NON SOUMIS, HORS TAXE, HT
+        s = re.sub(
+            r'[\s\-/\(]*\b('
+            r'TVA'
+            r'|EXON[ÉEée]R[ÉEée][EeSs]?'
+            r'|EXO\s*TVA'
+            r'|EXO'
+            r'|INTRA\s*COM(?:MUNAUTAIRE)?'
+            r'|INTRA'
+            r'|I\.?C\.?'
+            r'|AUTOLIQ(?:UIDATION)?'
+            r'|AUTO[\-\s]?LIQ(?:UIDATION)?'
+            r'|REVERSE\s*CHARGE'
+            r'|NON\s*SOUMIS(?:E)?'
+            r'|HORS\s*TAXE'
+            r'|HT'
+            r'|IMPORT'
+            r'|UE'
+            r'|CEE'
+            r')\b[\s\-/\)]*', ' ', s, flags=re.IGNORECASE)
+        # 3. Supprimer les mots résiduels type EX... en fin de chaîne
         s = re.sub(r'[\s\-/]*\bEX\w*\s*$', '', s, flags=re.IGNORECASE)
-        # Nettoyer les signes orphelins en début/fin et les espaces multiples
+        # 4. Nettoyer les signes orphelins en début/fin et les espaces multiples
         s = re.sub(r'^[\s\-/\(\)]+|[\s\-/\(\)]+$', '', s)
         return " ".join(s.split()).upper()
     return str(label).strip().upper()
