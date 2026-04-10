@@ -2429,6 +2429,11 @@ with m_cli:
         df_show = df_preview_c[cols_show].copy()
         df_show.insert(0, "Source", df_show.index.map(lambda i: sources.get(i, "")))
 
+        # Convertir Siren/Siret en str (Pandas les lit parfois en float)
+        for _col_str in ["Siren", "Siret"]:
+            if _col_str in df_show.columns:
+                df_show[_col_str] = df_show[_col_str].apply(lambda v: to_clean_str(v) if not pd.isna(v) else "")
+
         has_enriched = sirene_cells and any(any((i, c) in sirene_cells for c in cols_show) for i in sirene_info)
         if has_enriched:
             for idx in df_show.index:
