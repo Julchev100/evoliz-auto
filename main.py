@@ -439,7 +439,18 @@ with m2:
 
     # --- Bloc 1 : Login (récupère le token + liste des dossiers accessibles) ---
     auto_connect = not st.session_state.token_headers_105 and saved_pk and saved_sk
-    if auto_connect or st.button("🔗 CONNECTER", type="primary", use_container_width=True, key="btn_connect_105"):
+    # Toujours rendre le bouton (même si auto_connect va le déclencher)
+    btn_connect = st.button("🔗 CONNECTER", type="primary", use_container_width=True, key="btn_connect_105")
+    # Bouton déconnexion si déjà connecté
+    if st.session_state.token_headers_105:
+        if st.button("🔌 Se déconnecter / changer de clés", key="btn_disconnect"):
+            for _k in ('token_headers_105', 'company_id_105', 'companies_list',
+                        'ev_acc_105', 'ev_data_105', 'ev_clients_raw', 'ev_articles_raw', 'ev_invoices_raw'):
+                if _k in st.session_state:
+                    st.session_state[_k] = type(st.session_state[_k])() if isinstance(st.session_state[_k], (dict, list, set)) else None
+            st.session_state.token_headers_105 = {}
+            st.rerun()
+    if auto_connect or btn_connect:
         if pk_105 and sk_105:
             save_creds(pk_105, sk_105)
             with st.spinner("Connexion à Evoliz en cours..."):
@@ -457,12 +468,17 @@ with m2:
                 st.session_state.token_headers_105 = h
                 # Découverte des dossiers accessibles
                 _companies = []
+                _co_error = None
                 try:
                     r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h, timeout=15)
                     if r_co.status_code == 200:
                         _companies = r_co.json().get('data', [])
-                except:
-                    pass
+                    elif r_co.status_code == 403:
+                        _co_error = "scope prescriber_users absent — mode mono-dossier"
+                    else:
+                        _co_error = f"HTTP {r_co.status_code}"
+                except Exception as e:
+                    _co_error = str(e)
                 st.session_state.companies_list = _companies
                 if len(_companies) == 1:
                     st.session_state.company_id_105 = _companies[0].get('companyid') or _companies[0].get('id')
@@ -474,7 +490,12 @@ with m2:
                     # Pas de scope prescriber_users ou token mono-dossier sans /companies
                     cid = login_data.get('companyid')
                     st.session_state.company_id_105 = cid
-                    st.success(f"Connecté à Evoliz (company: {cid})")
+                    if _co_error:
+                        st.info(f"GET /companies : {_co_error}")
+                    if cid:
+                        st.success(f"Connecté à Evoliz — mono-dossier (company: {cid})")
+                    else:
+                        st.warning("Connecté mais aucun dossier détecté. Vérifiez les droits de vos clés API (scope prescriber_users requis pour le multi-dossier).")
             elif r_log:
                 st.error(f"Échec login : HTTP {r_log.status_code}")
 
