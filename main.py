@@ -2447,10 +2447,12 @@ with m_cli:
 
         st.subheader(f"👥 {len(df_preview_c)} client(s) consolides")
 
-        # Colonnes éditables : Siren + checkbox enrichissement
+        # Colonnes éditables : Siren, Type
         _editable_cols = []
         if "Siren" in df_show.columns:
             _editable_cols.append("Siren")
+        if "Type *" in df_show.columns:
+            _editable_cols.append("Type *")
         _disabled_cols = [c for c in df_show.columns if c not in _editable_cols and c != "✅"]
 
         if has_enriched:
@@ -2458,6 +2460,8 @@ with m_cli:
             _col_config = {"✅": st.column_config.CheckboxColumn("✅", default=True, width="small")}
             if "Siren" in df_show.columns:
                 _col_config["Siren"] = st.column_config.TextColumn("Siren", width="medium")
+            if "Type *" in df_show.columns:
+                _col_config["Type *"] = st.column_config.SelectboxColumn("Type *", options=["Particulier", "Professionnel", "Administration publique"], width="medium")
             edited = st.data_editor(df_show, use_container_width=True, hide_index=True,
                 disabled=_disabled_cols,
                 column_config=_col_config,
@@ -2471,11 +2475,22 @@ with m_cli:
             _col_config = {}
             if "Siren" in df_show.columns:
                 _col_config["Siren"] = st.column_config.TextColumn("Siren", width="medium")
+            if "Type *" in df_show.columns:
+                _col_config["Type *"] = st.column_config.SelectboxColumn("Type *", options=["Particulier", "Professionnel", "Administration publique"], width="medium")
             st.caption("Modifiez le Siren pour relancer la recherche sur ce numéro.")
             edited = st.data_editor(df_show, use_container_width=True, hide_index=True,
                 disabled=_disabled_cols,
                 column_config=_col_config,
                 key=f"meg_editor_siren_{st.session_state.get('meg_editor_ver', 0)}")
+
+        # Persister les modifications de Type dans le dataframe source
+        if "Type *" in df_show.columns and "Type *" in edited.columns:
+            for i in edited.index:
+                _old_type = str(df_show.at[i, "Type *"]).replace("🟢 ", "").strip() if i in df_show.index else ""
+                _new_type = str(edited.at[i, "Type *"]).strip()
+                if _new_type != _old_type and _new_type in ("Particulier", "Professionnel", "Administration publique"):
+                    df_preview_c.at[i, "Type *"] = _new_type
+                    st.session_state["meg_df_clients"] = df_preview_c
 
         # Détecter les SIREN modifiés et relancer la recherche
         if "Siren" in df_show.columns and "Siren" in edited.columns:
