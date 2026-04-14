@@ -185,7 +185,7 @@ def patch_evoliz_item(category, item_id, payload, headers, company_id=None):
     except Exception as e:
         return False, str(e)
 
-def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None, vat_rate=None):
+def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None, vat_rate=None, company_id=None):
     endpoint = FLUX_ENDPOINTS[flux_type]
     # Le code d'une catégorie/affectation est son libellé (tronqué à 50 car pour l'API)
     payload = {"code": label[:50], "label": label}
@@ -198,13 +198,28 @@ def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None, vat_r
         payload["vat_rate"] = float(vat_rate)
     # Debug : log du payload envoyé
     _payload_debug = {k: v for k, v in payload.items() if k not in ('code', 'label')}
+    # Fallback : recuperer le company_id depuis la session si non fourni
+    if company_id is None:
+        company_id = st.session_state.get('company_id_105')
+    # URL company-scoped si possible (requis pour les tokens prescriber_users)
+    if company_id:
+        url = f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}"
+    else:
+        url = f"https://www.evoliz.io/api/v1/{endpoint}"
     try:
-        r = requests.post(f"https://www.evoliz.io/api/v1/{endpoint}",
-                          headers=headers, json=payload, timeout=15)
+        r = requests.post(url, headers=headers, json=payload, timeout=15)
         if r.status_code in (200, 201):
             resp = r.json()
             resp['_sent'] = _payload_debug
             return True, resp
+        # Fallback : si 403/404 en company-scoped, re-essayer sans le prefixe
+        if r.status_code in (403, 404) and company_id:
+            r2 = requests.post(f"https://www.evoliz.io/api/v1/{endpoint}",
+                                headers=headers, json=payload, timeout=15)
+            if r2.status_code in (200, 201):
+                resp = r2.json()
+                resp['_sent'] = _payload_debug
+                return True, resp
         return False, f"HTTP {r.status_code} [sent:{_payload_debug}]: {r.text[:150]}"
     except Exception as e:
         return False, str(e)
@@ -252,6 +267,20 @@ for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFra
     if key not in st.session_state:
         st.session_state[key] = default
 
+# --- Constantes & helpers requis par la sidebar (definis avant pour eviter NameError) ---
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDS_PATH = os.path.join(APP_DIR, ".evoliz_creds.json")
+PARAM_PATH = os.path.join(APP_DIR, "param_local.csv")
+BALANCE_PATH_FILE = os.path.join(APP_DIR, ".last_balance_path.txt")
+
+def save_param_local(df):
+    df.to_csv(PARAM_PATH, index=False)
+
+def load_param_local():
+    if os.path.exists(PARAM_PATH):
+        return pd.read_csv(PARAM_PATH)
+    return pd.DataFrame()
+
 # --- Configuration du perimetre ---
 with st.sidebar:
     st.header("⚙️ Perimetre d'integration")
@@ -297,11 +326,6 @@ if show_param:
     st.markdown("""<style>
         [data-testid="stSidebar"] { min-width: 600px; max-width: 800px; }
     </style>""", unsafe_allow_html=True)
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CREDS_PATH = os.path.join(APP_DIR, ".evoliz_creds.json")
-PARAM_PATH = os.path.join(APP_DIR, "param_local.csv")
-BALANCE_PATH_FILE = os.path.join(APP_DIR, ".last_balance_path.txt")
 
 def save_creds(pk, sk):
     import json as _json
@@ -416,6 +440,11 @@ with m_import:
     st.subheader("📁 Import des fichiers sources")
     st.caption("Centralisez ici tous vos fichiers. Ils seront utilises dans les onglets correspondants.")
 
+    # Gate logique : pas d'import tant qu'aucun dossier Evoliz n'est identifie
+    _gate_import = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+    if not _gate_import:
+        st.warning("⛔ **Import bloque** — Connectez-vous a l'API Evoliz puis selectionnez un dossier dans l'onglet **🔑 Connexion API** avant d'importer des fichiers.")
+
     # Layout compact : label | browse | statut sur la même ligne
     # + sélection d'onglet automatique si fichier multi-feuilles
     def _file_row(label, types, session_key, uploader_key):
@@ -443,14 +472,15 @@ with m_import:
             if _f_uploaded:
                 st.session_state[f"{session_key}_sheet"] = 0
 
-    if mod_compta:
-        _file_row("📂 Balance", ["xlsm", "xlsx", "xls"], "imp_file_balance", "imp_balance")
-    if mod_clients:
-        _file_row("👥 Clients", ["xlsx", "xls", "csv"], "imp_file_clients", "imp_clients")
-    if mod_fournisseurs:
-        _file_row("🏭 Fournisseurs", ["xlsx", "xls", "csv"], "imp_file_fournisseurs", "imp_fournisseurs")
-    if mod_factures:
-        _file_row("🧾 Factures", ["xlsx", "xls"], "imp_file_factures", "imp_factures")
+    if _gate_import:
+        if mod_compta:
+            _file_row("📂 Balance", ["xlsm", "xlsx", "xls"], "imp_file_balance", "imp_balance")
+        if mod_clients:
+            _file_row("👥 Clients", ["xlsx", "xls", "csv"], "imp_file_clients", "imp_clients")
+        if mod_fournisseurs:
+            _file_row("🏭 Fournisseurs", ["xlsx", "xls", "csv"], "imp_file_fournisseurs", "imp_fournisseurs")
+        if mod_factures:
+            _file_row("🧾 Factures", ["xlsx", "xls"], "imp_file_factures", "imp_factures")
     if mod_articles:
         _file_row("📦 Articles", ["xlsx", "xls"], "imp_file_articles", "imp_articles")
 
@@ -468,14 +498,6 @@ def load_param_from_excel(file_obj):
         df_p[flux] = df_p['_tags'].apply(lambda tags, t=tag: t in tags)
     df_p = df_p.drop(columns=['_tags'])
     return df_p.dropna(subset=['Racine']).reset_index(drop=True)
-
-def save_param_local(df):
-    df.to_csv(PARAM_PATH, index=False)
-
-def load_param_local():
-    if os.path.exists(PARAM_PATH):
-        return pd.read_csv(PARAM_PATH)
-    return pd.DataFrame()
 
 # Chargement auto des params (necessaire pour la matrice, meme sans onglet Param visible)
 if st.session_state.nr_v62.empty and os.path.exists(PARAM_PATH):
@@ -718,7 +740,7 @@ with m2:
 
 # Le code Balance s'execute dans l'onglet Import fichiers (traitement silencieux)
 with m_import:
-  if mod_compta:
+  if mod_compta and st.session_state.get('company_id_105') and st.session_state.get('token_headers_105'):
     f105 = st.session_state.get("imp_file_balance")
     if not f105:
         # Fallback : chemin local
@@ -965,6 +987,13 @@ with m_import:
             st.success(f"Analyse terminée : {len(results)} lignes traitées, {len(rejets)} rejetées → voir onglets Matrice / Rejetées")
 
 with m4:
+    # Gate : necessite API + dossier + fichier Balance
+    _gate_matrice = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105')) and bool(st.session_state.get('imp_file_balance'))
+    if not _gate_matrice:
+        if not st.session_state.get('company_id_105'):
+            st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**).")
+        elif not st.session_state.get('imp_file_balance'):
+            st.warning("⛔ Importez le fichier **Balance** dans l'onglet **📁 Import fichiers**.")
     sub_rejets, sub_eraz, sub_audit, sub_matrice, sub_synthese, sub_synchro = st.tabs([
         "🚫 Rejetees", "🧹 Suppressions", "🔎 Mises a jour", "📋 Matrice", "📊 Synthese injection", "🚀 Injection"
     ])
@@ -1096,6 +1125,9 @@ with m4:
                         seen_ids.add(d['id'])
                 orphans_by_cat[flux] = orphans
 
+            # Partage avec la synthese
+            st.session_state["_orphans_total_by_cat"] = {c: len(v) for c, v in orphans_by_cat.items()}
+
             # Init des exclusions de suppression
             if "_skip_delete" not in st.session_state:
                 st.session_state._skip_delete = set()
@@ -1141,16 +1173,57 @@ with m6:
         eraz = st.session_state.eraz_counts
         eraz_items = st.session_state.eraz_items
 
+        # Récupérer les ajustements manuels précédents (persistés en session)
+        if "_synth_modif" not in st.session_state:
+            st.session_state._synth_modif = {c: 0 for c in ["COMPTE", "ACHAT", "VENTE", "ENTRÉE BQ", "SORTIE BQ"]}
+
+        # --- Decompte automatique des decisions manuelles ---
+        # 1) Orphelins gardes (decoches dans l'onglet Suppressions) -> + (n'a pas ete supprime)
+        _skip_del = st.session_state.get("_skip_delete", set())
+        orph_kept_par_cat = {c: 0 for c in ["COMPTE", "ACHAT", "VENTE", "ENTRÉE BQ", "SORTIE BQ"]}
+        for _key in _skip_del:
+            if isinstance(_key, tuple) and len(_key) == 2:
+                _cat = _key[0]
+                if _cat in orph_kept_par_cat:
+                    orph_kept_par_cat[_cat] += 1
+
+        # 2) Creations desactivees dans le detail synthese -> - (n'a pas ete cree)
+        _skip_cr = st.session_state.get("_skip_create", set())
+        skip_create_par_cat = {c: 0 for c in ["COMPTE", "ACHAT", "VENTE", "ENTRÉE BQ", "SORTIE BQ"]}
+        for _key in _skip_cr:
+            if isinstance(_key, tuple) and len(_key) >= 1:
+                _cat = _key[0]
+                if _cat in skip_create_par_cat:
+                    skip_create_par_cat[_cat] += 1
+
+        # 3) Total orphelins par categorie (peuple par l'onglet Suppressions, fallback 0)
+        _orph_total_par_cat = st.session_state.get("_orphans_total_by_cat", {})
+
         stats = []
         for cat in ["COMPTE", "ACHAT", "VENTE", "ENTRÉE BQ", "SORTIE BQ"]:
             lus = len(st.session_state.ev_acc_105) if cat == "COMPTE" else count_unique(st.session_state.ev_data_105.get(cat, {}))
             crees = len(df_m[df_m[cat] == '➕'])
             maj = len(df_m[df_m[cat] == '🔄'])
-            a_supprimer = len(eraz_items.get(cat, []))
+            # "A supprimer" = TOUS les orphelins (independamment de leur sort)
+            a_supprimer = _orph_total_par_cat.get(cat, len(eraz_items.get(cat, [])))
             supprimes = eraz.get(cat, 0)
             en_matrice = len(df_m[df_m[cat].isin(['✅', '➕', '🔄'])])
-            attendu = lus + crees - a_supprimer
-            coherent = attendu == en_matrice
+
+            # Decisions manuelles signees
+            plus_n = orph_kept_par_cat.get(cat, 0)        # + : items conserves (orphelins gardes)
+            minus_n = skip_create_par_cat.get(cat, 0)     # - : creations desactivees
+            modif_input = st.session_state._synth_modif.get(cat, 0)
+            net_modif = plus_n - minus_n + modif_input
+
+            modif_str = f"+{plus_n} / -{minus_n}"
+            if modif_input:
+                modif_str += f" ({'+' if modif_input>0 else ''}{modif_input})"
+
+            # Etat predit de l'API apres synchro
+            attendu = lus + crees - a_supprimer + net_modif
+            # Etat intentionnel (matrice + decisions manuelles)
+            cible = en_matrice + plus_n - minus_n
+            coherent = attendu == cible
 
             stats.append({
                 "Catégorie": cat,
@@ -1159,11 +1232,48 @@ with m6:
                 "🔄 À maj": maj,
                 "🗑️ À supprimer": a_supprimer,
                 "✅ Supprimés": supprimes,
+                "🛡️ Modifications manuelles": modif_str,
+                "🔧 Ajust.": modif_input,
                 "= Attendu": attendu,
+                "🎯 Cible": cible,
                 "📊 Matrice": en_matrice,
                 "✔️ Cohérent": "✅" if coherent else "❌",
             })
-        st.table(pd.DataFrame(stats))
+
+        df_stats = pd.DataFrame(stats)
+        edited_stats = st.data_editor(
+            df_stats,
+            use_container_width=True, hide_index=True,
+            disabled=["Catégorie", "📖 Lus API", "➕ À créer", "🔄 À maj",
+                       "🗑️ À supprimer", "✅ Supprimés", "🛡️ Modifications manuelles",
+                       "= Attendu", "🎯 Cible", "📊 Matrice", "✔️ Cohérent"],
+            column_config={
+                "🛡️ Modifications manuelles": st.column_config.TextColumn(
+                    "🛡️ Modifications manuelles",
+                    help="+X : orphelins conserves (decoches dans Suppressions). -Y : creations desactivees (decochees dans le detail). (Z) : ajustement manuel.",
+                ),
+                "🔧 Ajust.": st.column_config.NumberColumn(
+                    "🔧 Ajust.",
+                    help="Ajustement manuel additionnel (modifications hors app non detectees)",
+                    step=1, format="%d",
+                ),
+                "🎯 Cible": st.column_config.NumberColumn(
+                    "🎯 Cible",
+                    help="Etat intentionnel = Matrice + decisions manuelles",
+                    format="%d",
+                ),
+            },
+        )
+        # Persister les ajustements et recalculer la cohérence en temps réel
+        _modif_changed = False
+        for _, row in edited_stats.iterrows():
+            cat = row["Catégorie"]
+            new_modif = int(row["🔧 Ajust."])
+            if st.session_state._synth_modif.get(cat, 0) != new_modif:
+                st.session_state._synth_modif[cat] = new_modif
+                _modif_changed = True
+        if _modif_changed:
+            st.rerun()
 
         # --- Visualisation par catégorie : existants + à créer (avec possibilité de désactiver) ---
         st.divider()
@@ -1375,7 +1485,7 @@ with m7:
                 _vr = None
                 if flux_type == "ACHAT" and compte_code and str(compte_code).startswith(('2', '6')):
                     _vr = tva_achat_rate
-                return inject_flux(flux_type, code, label, hdrs, vat_id=vat_id, acc_id=acc_id, vat_rate=_vr)
+                return inject_flux(flux_type, code, label, hdrs, vat_id=vat_id, acc_id=acc_id, vat_rate=_vr, company_id=cid)
 
             # --- 1. DELETE orphelins (parallèle par paquets) ---
             if eraz_items:
@@ -2064,6 +2174,9 @@ def _auto_map_columns(src_columns):
 
 # --- Onglet Injection Clients ---
 with m_cli:
+    _gate_cli = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+    if not _gate_cli:
+        st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     _is_supplier = False
     _entity_label = "clients"
     _entity_api = "clients"
@@ -3158,6 +3271,8 @@ with m_cli:
 
 # --- Onglet Injection Fournisseurs ---
 with m_four:
+    if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
+        st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("🏭 Injection Fournisseurs")
     st.caption("1. Importez un fichier fournisseurs  2. Mapping colonnes  3. Consolidation Evoliz  4. Injection")
 
@@ -3355,12 +3470,291 @@ with m_four:
                 df_four_preview = pd.DataFrame([{k: v for k, v in c.items() if not k.startswith("_")} for c in consol_four])
                 _sources_f = [c["_source"] for c in consol_four]
                 df_four_preview.insert(0, "Source", _sources_f)
+                _four_ev_ids = {i: c.get("_entityid") for i, c in enumerate(consol_four)}
+
+                # Marquage visuel des cellules enrichies via Sirene (prefixe 🟢)
+                _four_cells = st.session_state.get("_four_sirene_cells", set())
+                if _four_cells:
+                    for idx in df_four_preview.index:
+                        for col in df_four_preview.columns:
+                            if (idx, col) in _four_cells:
+                                val = df_four_preview.at[idx, col]
+                                if val is not None and str(val).strip() and not str(val).startswith("🟢"):
+                                    df_four_preview.at[idx, col] = f"🟢 {val}"
                 st.dataframe(df_four_preview, use_container_width=True, hide_index=True)
+
+                # --- Option : code fournisseur = SIREN ---
+                _code_is_siren = st.checkbox(
+                    "🔢 Le champ « Code » contient un SIREN — rechercher directement sur ce numero",
+                    value=st.session_state.get("_four_code_is_siren", False),
+                    key="_four_code_is_siren",
+                    help="Active si les codes fournisseurs sont en fait des SIREN (9 chiffres). La recherche Sirene utilisera ce numero au lieu du nom.",
+                )
+
+                # --- Enrichissement Sirene fournisseurs ---
+                st.divider()
+                if st.button("🔍 Enrichir fournisseurs via Sirene", type="primary", use_container_width=True, key="btn_sirene_four"):
+                    _f_ok = _f_ko = _f_skip = _f_complete = 0
+                    _total_f = len(consol_four)
+
+                    # 1) Preparer les taches (exclure les fournisseurs sans nom ou deja complets)
+                    _tasks_f = []
+                    for i, cr in enumerate(consol_four):
+                        nom = cr.get("Raison sociale", "")
+                        code = to_clean_str(cr.get("Code", ""))
+                        if not nom and not (_code_is_siren and code): _f_skip += 1; continue
+                        _has_all = all(cr.get(f) and cr.get(f) not in ("", "NC") for f in ["Siret", "Code postal", "Ville"])
+                        if _has_all: _f_complete += 1; continue
+                        # Si l'option SIREN cochee : extraire le SIREN du code (format "F123456789" ou "123456789")
+                        _siren_candidat = ""
+                        if _code_is_siren and code:
+                            _c = code.upper().lstrip("F").strip()
+                            if _c.isdigit() and len(_c) == 9:
+                                _siren_candidat = _c
+                        if _siren_candidat:
+                            _tasks_f.append((i, _siren_candidat, nom or code, "siren"))
+                        else:
+                            sq = " ".join(nom.replace("nan", "").split()).strip()
+                            if not sq: _f_skip += 1; continue
+                            _tasks_f.append((i, sq, nom, "nom"))
+
+                    # 2) Recherche Sirene parallele (7 workers) - par SIREN ou par nom
+                    def _search_four(task):
+                        idx, query, nom, mode = task
+                        try:
+                            r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                             params={"q": query, "per_page": 1, "page": 1}, timeout=10)
+                            if r.status_code == 429:
+                                time.sleep(2)
+                                r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                                 params={"q": query, "per_page": 1, "page": 1}, timeout=10)
+                            return (idx, nom, mode, r.status_code, r.json() if r.status_code == 200 else None)
+                        except Exception as exc:
+                            return (idx, nom, mode, -1, str(exc))
+
+                    _pg_bar = st.progress(0.0, text=f"Enrichissement Sirene — 0 / {len(_tasks_f)} (7 workers)")
+                    _results_f = []
+                    if _tasks_f:
+                        with ThreadPoolExecutor(max_workers=7) as pool:
+                            futures_f = {pool.submit(_search_four, t): t for t in _tasks_f}
+                            for _n, fut in enumerate(as_completed(futures_f)):
+                                _results_f.append(fut.result())
+                                _pg_bar.progress((_n + 1) / len(_tasks_f),
+                                                   text=f"Enrichissement Sirene — {_n+1} / {len(_tasks_f)}")
+
+                    # 3) Application des resultats (sequentiel, ecriture dans consol_four)
+                    _four_cells = set(st.session_state.get("_four_sirene_cells", set()))
+                    for idx, nom, mode, status, data in _results_f:
+                        if status != 200 or not data:
+                            _f_ko += 1; continue
+                        results = data.get("results", [])
+                        if not results:
+                            _f_ko += 1; continue
+                        ent = results[0]; siege = ent.get("siege", {})
+                        # Par SIREN : identification exacte, pas de controle de similarite
+                        if mode != "siren":
+                            nom_n = norm_piv(nom); best_n = norm_piv(ent.get("nom_complet", ""))
+                            if not (nom_n == best_n or nom_n in best_n or best_n in nom_n or
+                                    (len(nom_n) > 3 and len(best_n) > 3 and len(set(nom_n) & set(best_n)) / max(len(set(nom_n)), len(set(best_n))) > 0.6)):
+                                _f_ko += 1; continue
+                        cr = consol_four[idx]
+                        for fld, val in [("Raison sociale", ent.get("nom_complet", ent.get("nom_raison_sociale", ""))),
+                                         ("Siret", siege.get("siret", "")), ("Code postal", siege.get("code_postal", "")),
+                                         ("Ville", siege.get("libelle_commune", "")), ("APE / NAF", ent.get("activite_principale", "")),
+                                         ("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))]:
+                            if val and (not cr.get(fld) or cr.get(fld) in ("", "NC")):
+                                consol_four[idx][fld] = val
+                                _four_cells.add((idx, fld))
+                        siren = ent.get("siren", "")
+                        if siren and (not cr.get("TVA intracommunautaire") or cr.get("TVA intracommunautaire") in ("", "NC")):
+                            try:
+                                consol_four[idx]["TVA intracommunautaire"] = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"
+                                _four_cells.add((idx, "TVA intracommunautaire"))
+                            except ValueError: pass
+                        if not cr.get("Adresse"):
+                            pts = [siege.get("numero_voie", ""), siege.get("type_voie", ""), siege.get("libelle_voie", "")]
+                            a = " ".join(p for p in pts if p)
+                            if a:
+                                consol_four[idx]["Adresse"] = a
+                                _four_cells.add((idx, "Adresse"))
+                        _f_ok += 1
+
+                    _pg_bar.progress(1.0, text=f"✅ Termine — {len(_tasks_f)} / {len(_tasks_f)}")
+                    st.session_state["_four_consol"] = consol_four
+                    st.session_state["_four_sirene_cells"] = _four_cells
+                    st.session_state["_four_sirene_result"] = f"Enrichissement : {_f_ok} enrichi(s), {_f_complete} deja complet(s), {_f_ko} non trouve(s), {_f_skip} ignore(s)"
+                    st.rerun()
+                if st.session_state.get("_four_sirene_result"):
+                    st.success(st.session_state["_four_sirene_result"])
+
+                # --- 2ème lame : propositions Sirene pour les fournisseurs non identifies ---
+                _four_cells_cur = st.session_state.get("_four_sirene_cells", set())
+                _four_enriched_rows = {r for (r, _c) in _four_cells_cur}
+                _non_enrichis_f = []
+                for i, cr in enumerate(consol_four):
+                    nom = cr.get("Raison sociale", "")
+                    code = cr.get("Code", "")
+                    # non enrichi ET sans Siret connu
+                    if i not in _four_enriched_rows and nom and nom != "nan" and not cr.get("Siret"):
+                        _non_enrichis_f.append((i, nom, code))
+
+                if _non_enrichis_f:
+                    st.divider()
+                    st.subheader(f"🔍 2ème lame — {len(_non_enrichis_f)} fournisseur(s) non identifie(s)")
+                    st.caption("Les 2 resultats Sirene les plus probables sont proposes. Selectionnez le bon ou ignorez.")
+                    if st.button(f"🔍 Rechercher les {len(_non_enrichis_f)} propositions", type="primary", use_container_width=True, key="btn_2eme_lame_four"):
+                        def _search_2eme_four(task):
+                            idx, nom, code = task
+                            try:
+                                sq = " ".join(nom.replace("nan", "").split()).strip()
+                                if not sq: return (idx, nom, code, [])
+                                r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                                 params={"q": sq, "per_page": 2, "page": 1}, timeout=10)
+                                if r.status_code == 429:
+                                    time.sleep(2)
+                                    r = requests.get("https://recherche-entreprises.api.gouv.fr/search",
+                                                     params={"q": sq, "per_page": 2, "page": 1}, timeout=10)
+                                if r.status_code != 200: return (idx, nom, code, [])
+                                results = r.json().get("results", [])
+                                props = []
+                                for res in results[:2]:
+                                    rsie = res.get("siege") or {}
+                                    props.append({
+                                        "nom": res.get("nom_complet", res.get("nom_raison_sociale", "")),
+                                        "siren": res.get("siren", ""),
+                                        "ville": rsie.get("libelle_commune", ""),
+                                        "activite": _naf_label(rsie.get("activite_principale", "")),
+                                        "_raw": res,
+                                    })
+                                return (idx, nom, code, props)
+                            except Exception:
+                                return (idx, nom, code, [])
+
+                        _all_props_f = []
+                        _pg_2 = st.progress(0.0, text=f"Recherche propositions Sirene — 0 / {len(_non_enrichis_f)}")
+                        with ThreadPoolExecutor(max_workers=7) as pool:
+                            futures_2 = {pool.submit(_search_2eme_four, t): t for t in _non_enrichis_f}
+                            for _n, fut in enumerate(as_completed(futures_2)):
+                                _all_props_f.append(fut.result())
+                                _pg_2.progress((_n + 1) / len(_non_enrichis_f),
+                                                 text=f"Recherche propositions Sirene — {_n+1} / {len(_non_enrichis_f)}")
+                        _props_dict_f = {}
+                        for idx, nom, code, props in _all_props_f:
+                            if props:
+                                _props_dict_f[idx] = {"fournisseur": nom, "code": code, "propositions": props}
+                        st.session_state["_2eme_lame_four_props"] = _props_dict_f
+                        st.session_state["_2eme_lame_four_result"] = f"2eme lame : {len(_props_dict_f)} fournisseur(s) avec propositions sur {len(_non_enrichis_f)} recherche(s)"
+                        st.rerun()
+
+                    if st.session_state.get("_2eme_lame_four_result"):
+                        st.success(st.session_state["_2eme_lame_four_result"])
+
+                    # Afficher les propositions pour validation
+                    _props_f = st.session_state.get("_2eme_lame_four_props", {})
+                    if _props_f:
+                        st.divider()
+                        st.subheader(f"📋 {len(_props_f)} proposition(s) a valider")
+                        _accepted_f = []
+                        for idx, info in sorted(_props_f.items()):
+                            props = info["propositions"]
+                            options = ["— Ignorer"] + [
+                                f"{p['nom']} | SIREN {p['siren']} | {p['ville']} | {p['activite']}" for p in props
+                            ]
+                            sel = st.selectbox(f"**{info['fournisseur']}** ({info['code']})", options, key=f"prop2_four_{idx}")
+                            if sel != "— Ignorer":
+                                _sel_idx = options.index(sel) - 1
+                                _accepted_f.append((idx, props[_sel_idx]))
+
+                        if _accepted_f:
+                            if st.button(f"✅ Appliquer {len(_accepted_f)} selection(s)", type="primary", use_container_width=True, key="btn_apply_2eme_four"):
+                                _four_cells2 = set(st.session_state.get("_four_sirene_cells", set()))
+                                for idx, prop in _accepted_f:
+                                    ent = prop["_raw"]; siege = ent.get("siege", {})
+                                    siren = ent.get("siren", ""); siret = siege.get("siret", "")
+                                    cr = consol_four[idx]
+                                    def _upd_f(fld, val, _idx=idx):
+                                        if val and (not cr.get(fld) or cr.get(fld) in ("", "NC")):
+                                            consol_four[_idx][fld] = val
+                                            _four_cells2.add((_idx, fld))
+                                    _upd_f("Siret", siret)
+                                    _upd_f("Code postal", siege.get("code_postal", ""))
+                                    _upd_f("Ville", siege.get("libelle_commune", ""))
+                                    _upd_f("APE / NAF", ent.get("activite_principale", ""))
+                                    _upd_f("Forme juridique", _normalize_forme_juridique(ent.get("nature_juridique", "")))
+                                    if siren:
+                                        try:
+                                            tv = f"FR{(12 + 3 * (int(siren) % 97)) % 97:02d}{siren}"
+                                            _upd_f("TVA intracommunautaire", tv)
+                                        except ValueError: pass
+                                    pts = [siege.get("numero_voie", ""), siege.get("type_voie", ""), siege.get("libelle_voie", "")]
+                                    _upd_f("Adresse", " ".join(p for p in pts if p))
+                                # Retirer les props appliquees
+                                for idx, _ in _accepted_f:
+                                    if idx in st.session_state["_2eme_lame_four_props"]:
+                                        del st.session_state["_2eme_lame_four_props"][idx]
+                                st.session_state["_four_consol"] = consol_four
+                                st.session_state["_four_sirene_cells"] = _four_cells2
+                                st.rerun()
+
+                # --- Vérification champs obligatoires ---
+                st.divider()
+                st.subheader("⚠️ Vérification avant injection")
+                _four_required = {"Raison sociale": "name", "Code": "code", "Code postal": "postcode", "Ville": "town", "Code pays (ISO 2)": "iso2"}
+                _four_missing = []
+                for i, cr in enumerate(consol_four):
+                    _manques = []
+                    for fld in _four_required:
+                        val = cr.get(fld, "")
+                        if not val or val in ("NC", "nan"):
+                            _manques.append(fld)
+                    if _manques:
+                        _four_missing.append({"idx": i, "Code": cr.get("Code",""), "Nom": cr.get("Raison sociale",""), "Champs manquants": ", ".join(_manques)})
+
+                if _four_missing:
+                    st.warning(f"⚠️ {len(_four_missing)} fournisseur(s) avec champs obligatoires manquants.")
+                    if st.button("🔄 Compléter les vides (CP=00000, Ville=Inconnue, Pays=FR)", use_container_width=True, key="btn_fill_four"):
+                        for mr in _four_missing:
+                            _defaults_f = {"Code postal": "00000", "Ville": "Inconnue", "Code pays (ISO 2)": "FR"}
+                            for fld, dval in _defaults_f.items():
+                                _cur = consol_four[mr["idx"]].get(fld, "")
+                                if not _cur or _cur in ("NC", "nan"):
+                                    consol_four[mr["idx"]][fld] = dval
+                        st.session_state["_four_consol"] = consol_four
+                        st.rerun()
+                    st.dataframe(pd.DataFrame(_four_missing)[["Code", "Nom", "Champs manquants"]], use_container_width=True, hide_index=True)
+                else:
+                    st.success("✅ Tous les fournisseurs ont les champs obligatoires remplis.")
+
+                # --- Récapitulatif final éditable ---
+                st.divider()
+                st.subheader(f"📋 Récapitulatif final — {len(consol_four)} fournisseurs")
+                _four_show_cols = ["Source", "Code", "Raison sociale", "Code postal", "Ville", "Code pays (ISO 2)",
+                                   "Siret", "TVA intracommunautaire", "Forme juridique", "APE / NAF", "Adresse", "Telephone"]
+                _df_four_final = pd.DataFrame([{k: v for k, v in c.items() if not k.startswith("_")} for c in consol_four])
+                if "Source" not in _df_four_final.columns:
+                    _df_four_final.insert(0, "Source", [c["_source"] for c in consol_four])
+                _four_show_cols = [c for c in _four_show_cols if c in _df_four_final.columns]
+                _df_four_final = _df_four_final[_four_show_cols]
+                for _cs in ["Siret"]:
+                    if _cs in _df_four_final.columns:
+                        _df_four_final[_cs] = _df_four_final[_cs].apply(lambda v: to_clean_str(v) if not pd.isna(v) else "")
+                with st.expander(f"👁️ Voir / éditer les {len(consol_four)} fournisseurs", expanded=False):
+                    _four_edited = st.data_editor(_df_four_final, use_container_width=True, hide_index=True,
+                                                   disabled=["Source"], key=f"four_recap_{st.session_state.get('meg_editor_ver', 0)}")
+                    # Persister les modifications
+                    for _i in _four_edited.index:
+                        for _col in [c for c in _four_show_cols if c != "Source"]:
+                            if _col in _four_edited.columns:
+                                _new_v = str(_four_edited.at[_i, _col]).strip() if not pd.isna(_four_edited.at[_i, _col]) else ""
+                                _old_v = consol_four[_i].get(_col, "")
+                                if _new_v != _old_v and _new_v:
+                                    consol_four[_i][_col] = _new_v
+                                    st.session_state["_four_consol"] = consol_four
 
                 # Injection
                 st.divider()
                 st.subheader("🚀 Injection fournisseurs dans Evoliz")
-                inject_four_btn = st.button("🚀 Injecter les fournisseurs", type="primary", use_container_width=True, key="btn_inject_four", disabled=not has_api_f)
+                inject_four_btn = st.button("🚀 Injecter les fournisseurs", type="primary", use_container_width=True, key="btn_inject_four", disabled=not has_api_f or bool(_four_missing))
                 if inject_four_btn and has_api_f:
                     headers_f = st.session_state.token_headers_105; cid_f = st.session_state.company_id_105
                     url_four = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
@@ -3414,6 +3808,8 @@ with m_four:
 
 # --- Onglet Bascule Factures ---
 with m_fac:
+    if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
+        st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("🧾 Bascule Factures, Avoirs & Paiements MEG")
     f_meg_fac = st.session_state.get("imp_file_factures")
     f_meg_cli2 = None  # utilise le gabarit genere a l'etape clients
@@ -3513,6 +3909,8 @@ with m_fac:
 
 # --- Onglet Bascule Articles ---
 with m_art:
+    if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
+        st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("📦 Bascule Articles MEG")
     art_mode = st.radio("Mode", ["Gabarit Excel","Envoi direct API Evoliz"], horizontal=True, key="art_mode")
     f_meg_art = st.session_state.get("imp_file_articles")

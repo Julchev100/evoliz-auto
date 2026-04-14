@@ -1,5 +1,5 @@
 Racine,Libellé,ACHAT,VENTE,ENTRÉE BQ,SORTIE BQ
-1,Capital et réserves,False,False,False,False
+1,Capital et réserves,True,False,False,False
 101,Capital,False,False,True,False
 1012,C,False,False,False,False
 102,Fonds fiduciaires,False,False,False,False
@@ -37,7 +37,7 @@ Racine,Libellé,ACHAT,VENTE,ENTRÉE BQ,SORTIE BQ
 4191,Clients - Avances et acomptes reçus sur commandes ,False,False,True,False
 42,Personnel et comptes rattachés,False,False,False,True
 428,Personnel - Charges à payer et produits à recevoir,False,False,False,False
-43,Sécurité sociale et autres organismes sociaux ,True,False,False,True
+43,Sécurité sociale et autres organismes sociaux ,False,False,False,True
 438,Organismes sociaux - Charges à payer et produits à recevoir ,False,False,False,False
 44,État et autres collectivités publiques ,False,False,False,True
 441,État - Subventions à recevoir,False,False,False,False
