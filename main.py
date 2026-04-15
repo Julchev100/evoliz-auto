@@ -369,16 +369,17 @@ if show_param:
     </style>""", unsafe_allow_html=True)
 
 def save_creds(pk, sk):
-    import json as _json
-    with open(CREDS_PATH, 'w') as f:
-        _json.dump({"pk": pk, "sk": sk}, f)
+    """No-op : les cles API ne sont pas persistees entre rechargements (securite)."""
+    pass
 
 def load_creds():
-    import json as _json
-    if os.path.exists(CREDS_PATH):
-        with open(CREDS_PATH) as f:
-            d = _json.load(f)
-            return d.get("pk", ""), d.get("sk", "")
+    """Supprime tout fichier de cles residuel et retourne des champs vides.
+    Les cles doivent etre saisies a nouveau a chaque rechargement."""
+    try:
+        if os.path.exists(CREDS_PATH):
+            os.remove(CREDS_PATH)
+    except Exception:
+        pass
     return "", ""
 
 def save_balance_path(path):
