@@ -668,22 +668,33 @@ with m2:
                                 except Exception:
                                     pass
 
-                        # 4) Decodage JWT
+                        # 4) Decodage JWT : pour company_users, le champ `sub` contient le companyid (Customer number)
                         if not cid:
-                            _status.caption("4/4 — decodage du JWT...")
-                    # Dernier recours : decoder le JWT (sub = user ID, mais parfois companyid present)
-                    if not cid:
-                        try:
-                            import base64 as _b64, json as _jsn
-                            _tok = login_data.get('access_token', '')
-                            _parts = _tok.split('.')
-                            if len(_parts) >= 2:
-                                _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
-                                _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                                cid = (_payload.get('companyid') or _payload.get('company_id')
-                                       or _payload.get('cid') or _payload.get('company'))
-                        except Exception:
-                            pass
+                            _status.caption("4/4 — decodage du JWT (sub = companyid)...")
+                            try:
+                                import base64 as _b64, json as _jsn
+                                _tok = login_data.get('access_token', '')
+                                _parts = _tok.split('.')
+                                if len(_parts) >= 2:
+                                    _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
+                                    _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                                    # `sub` = companyid pour les cles company_users (Customer number Evoliz)
+                                    _candidate = (_payload.get('companyid') or _payload.get('company_id')
+                                                   or _payload.get('cid') or _payload.get('company')
+                                                   or _payload.get('sub'))
+                                    # Valider via GET /companies/{candidate}
+                                    if _candidate:
+                                        try:
+                                            _r_val = requests.get(f"https://www.evoliz.io/api/v1/companies/{_candidate}", headers=h, timeout=5)
+                                            if _r_val.status_code == 200:
+                                                cid = _candidate
+                                        except Exception:
+                                            pass
+                                        # Si le GET ne valide pas, tenter quand meme (certaines API renvoient 404 meme si cid correct)
+                                        if not cid:
+                                            cid = _candidate
+                            except Exception:
+                                pass
 
                     st.session_state.company_id_105 = cid
                     if _co_error:
@@ -707,7 +718,8 @@ with m2:
                         st.session_state["_key_mode"] = "mono"
                         st.success(f"🔐 **Cle client (company_users)** — mono-dossier : {_co_name} (ID: {cid})")
                     else:
-                        st.warning("🔐 **Cle client connectee** mais le companyid n'a pas pu etre detecte automatiquement. Saisissez-le manuellement ci-dessous (visible dans l'URL Evoliz : `https://xxx.evoliz.com/#/...` ou dans vos parametres API).")
+                        st.warning("🔐 **Cle client connectee** mais le companyid n'a pas pu etre detecte automatiquement (l'API Evoliz n'expose pas cette info pour les tokens company_users). **Saisie manuelle requise** :")
+                        st.caption("💡 Trouvez votre companyid dans l'URL Evoliz quand vous etes connecte : `https://xxx.evoliz.com/#/companies/XXXXX/...` -> XXXXX est le companyid.")
                         with st.expander("🔬 Diagnostic login (debug)", expanded=False):
                             st.json(login_data)
             elif r_log.status_code == 401:
