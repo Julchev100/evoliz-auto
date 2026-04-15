@@ -707,40 +707,39 @@ with m2:
                     if cid:
                         # Tenter de recuperer le nom via GET /companies (sans cid) qui pour company_users
                         # renvoie la/les company(s) visible(s). Selon doc Evoliz : le prefixe company est optionnel.
+                        # IMPORTANT : ne consulter QUE les endpoints /companies, car d'autres endpoints (clients, users)
+                        # contiennent un champ "name" qui ne correspond PAS au nom de la societe.
                         _co_name = f"Dossier {cid}"
                         _name_found = False
                         for _url_tpl in [
-                            "https://www.evoliz.io/api/v1/companies",  # liste (devrait renvoyer 1 item pour company_users)
-                            f"https://www.evoliz.io/api/v1/companies/{cid}",
-                            "https://www.evoliz.io/api/v1/settings/features",
-                            f"https://www.evoliz.io/api/v1/clients?per_page=1",  # un client contient le nom de l'entreprise indirectement
+                            "https://www.evoliz.io/api/v1/companies",            # liste -> renvoie 1 item pour company_users
+                            f"https://www.evoliz.io/api/v1/companies/{cid}",     # detail du dossier
                         ]:
                             try:
                                 _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
-                                if _r_cn.status_code == 200:
-                                    _body = _r_cn.json() if _r_cn.text else {}
-                                    # Pour GET /companies, data est une liste
-                                    _data_val = _body.get("data") if isinstance(_body, dict) else None
-                                    if isinstance(_data_val, list) and _data_val:
-                                        _obj = _data_val[0]
-                                        _n = _obj.get("company_name") or _obj.get("name")
-                                        if _n:
-                                            _co_name = _n; _name_found = True
-                                            # Si le companyid est present, le recuperer aussi (cas du GET /companies)
-                                            _real_cid = _obj.get("companyid") or _obj.get("id")
-                                            if _real_cid and _url_tpl.endswith("/companies"):
-                                                cid = _real_cid
-                                            break
-                                    # Sinon data est un objet
-                                    if isinstance(_data_val, dict):
-                                        _n = _data_val.get("company_name") or _data_val.get("name")
-                                        if _n:
-                                            _co_name = _n; _name_found = True; break
-                                    # Ou racine
-                                    if isinstance(_body, dict):
-                                        _n = _body.get("company_name") or _body.get("name")
-                                        if _n:
-                                            _co_name = _n; _name_found = True; break
+                                if _r_cn.status_code != 200:
+                                    continue
+                                _body = _r_cn.json() if _r_cn.text else {}
+                                _data_val = _body.get("data") if isinstance(_body, dict) else None
+                                # GET /companies -> data = liste d'objets company
+                                if isinstance(_data_val, list) and _data_val:
+                                    _obj = _data_val[0]
+                                    _n = _obj.get("company_name")  # champ specifique Evoliz
+                                    if _n:
+                                        _co_name = _n; _name_found = True
+                                        # Recuperer aussi le companyid reel (JWT sub peut etre user-id)
+                                        _real_cid = _obj.get("companyid") or _obj.get("id")
+                                        if _real_cid:
+                                            cid = _real_cid
+                                        break
+                                # GET /companies/{cid} -> data = objet company
+                                if isinstance(_data_val, dict):
+                                    _n = _data_val.get("company_name")
+                                    if _n:
+                                        _co_name = _n; _name_found = True; break
+                                # Reponse a la racine (sans wrap data)
+                                if isinstance(_body, dict) and _body.get("company_name"):
+                                    _co_name = _body["company_name"]; _name_found = True; break
                             except Exception:
                                 pass
                         # Construire une entree dans companies_list pour permettre les appels scoped
@@ -934,20 +933,23 @@ with m2:
             _date_from = (dt_datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
             # 8 tâches en parallèle : 5 compta + clients + articles + factures
+            # Pour les endpoints compta (accounts, classifications, affectations) : fetch_evoliz_data
+            # gere lui-meme le prefixe /companies/{cid}/ (ou absence si cid=None).
+            # Pour clients/articles/invoices : URL complete construite a partir de _base.
             _load_tasks = {
-                "accounts": ("accounts", _h, _cid_for_fetch, None),
-                "purchase-classifications": ("purchase-classifications", _h, _cid_for_fetch, None),
-                "sale-classifications": ("sale-classifications", _h, _cid_for_fetch, None),
-                "sale-affectations": ("sale-affectations", _h, _cid_for_fetch, None),
-                "purchase-affectations": ("purchase-affectations", _h, _cid_for_fetch, None),
-                "clients": (f"{_base}/clients", _h, None, None),
-                "articles": (f"{_base}/articles", _h, None, None),
-                "invoices": (f"{_base}/invoices", _h, None, None),
+                "accounts": ("accounts", _h, _cid_for_fetch, "compta", None),
+                "purchase-classifications": ("purchase-classifications", _h, _cid_for_fetch, "compta", None),
+                "sale-classifications": ("sale-classifications", _h, _cid_for_fetch, "compta", None),
+                "sale-affectations": ("sale-affectations", _h, _cid_for_fetch, "compta", None),
+                "purchase-affectations": ("purchase-affectations", _h, _cid_for_fetch, "compta", None),
+                "clients": (f"{_base}/clients", _h, None, "url", None),
+                "articles": (f"{_base}/articles", _h, None, "url", None),
+                "invoices": (f"{_base}/invoices", _h, None, "url", None),
             }
 
             def _run_fetch(key, args):
-                endpoint, headers, cid, extra = args
-                if cid:
+                endpoint, headers, cid, kind, extra = args
+                if kind == "compta":
                     return key, fetch_evoliz_data(endpoint, headers, company_id=cid)
                 else:
                     return key, _fetch_paginated(endpoint, headers, params_extra=extra)
