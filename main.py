@@ -263,7 +263,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
         return False, str(e)
 
 st.title("🍌 Banana Import Club")
-st.caption("Version **v2026.04.15-auth-v7** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
+st.caption("Version **v2026.04.15-auth-v8** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -707,24 +707,48 @@ with m2:
                             except Exception as _ex:
                                 _diag_steps.append({"step": f"GET /{_res}", "error": str(_ex)[:200]})
 
-                    # Si on a un cid mais pas de nom -> GET /companies/{cid}
-                    if cid and not _co_name:
+                    # Recuperation du nom via endpoints accessibles aux company_users
+                    # (sans prefixe /companies/{cid}/ - l'API resoud automatiquement vers le dossier de l'utilisateur)
+                    _endpoints_for_name = [
+                        "https://www.evoliz.io/api/v1/settings/features",
+                        "https://www.evoliz.io/api/v1/settings/pdf",
+                    ]
+                    if cid:
+                        _endpoints_for_name.insert(0, f"https://www.evoliz.io/api/v1/companies/{cid}")
+                        _endpoints_for_name.append(f"https://www.evoliz.io/api/v1/companies/{cid}/settings/features")
+
+                    for _url in _endpoints_for_name:
+                        if _co_name: break
                         try:
-                            _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
-                                                  headers=_h_full, timeout=15)
+                            _r = requests.get(_url, headers=_h_full, timeout=8)
                             _diag_steps.append({
-                                "step": f"GET /api/v1/companies/{cid}",
-                                "status": _r_cn.status_code,
-                                "response_body": _r_cn.text[:500],
+                                "step": f"GET {_url.replace('https://www.evoliz.io/api/v1/', '')}",
+                                "status": _r.status_code,
+                                "response_body": _r.text[:400],
                             })
-                            if _r_cn.status_code == 200:
-                                _body = _r_cn.json()
-                                _obj = _body.get("data") if isinstance(_body, dict) else None
-                                if not isinstance(_obj, dict):
-                                    _obj = _body if isinstance(_body, dict) else {}
-                                _co_name = _obj.get("company_name")
+                            if _r.status_code == 200:
+                                _body = _r.json()
+                                # Scan recursif pour company_name et companyid
+                                def _scan(obj, depth=0):
+                                    if depth > 5: return (None, None)
+                                    _nm, _ci = None, None
+                                    if isinstance(obj, dict):
+                                        _nm = obj.get("company_name")
+                                        _ci = obj.get("companyid") or obj.get("company_id")
+                                        if not _nm or not _ci:
+                                            for _v in obj.values():
+                                                _sn, _sc = _scan(_v, depth + 1)
+                                                _nm = _nm or _sn
+                                                _ci = _ci or _sc
+                                                if _nm and _ci: break
+                                    elif isinstance(obj, list) and obj:
+                                        return _scan(obj[0], depth + 1)
+                                    return (_nm, _ci)
+                                _nm_found, _ci_found = _scan(_body)
+                                if _nm_found: _co_name = _nm_found
+                                if _ci_found and not cid: cid = _ci_found
                         except Exception as _ex:
-                            _diag_steps.append({"step": f"GET /companies/{cid}", "error": str(_ex)[:200]})
+                            _diag_steps.append({"step": f"GET {_url}", "error": str(_ex)[:200]})
 
                     st.session_state["_login_diag"] = _diag_steps
 
