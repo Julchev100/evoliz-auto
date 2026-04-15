@@ -661,20 +661,35 @@ with m2:
                     st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
                 else:
                     # Pas de scope prescriber_users -> token company_users (mono-dossier)
-                    # Direct : on lit le companyid depuis le JWT (sub = Customer number Evoliz)
                     cid = None
+                    _company_name_from_api = None
+
+                    # 1) Essayer GET /api/v1/clients (sans prefixe) : la reponse contient le companyid
                     try:
-                        import base64 as _b64, json as _jsn
-                        _tok = login_data.get('access_token', '')
-                        _parts = _tok.split('.')
-                        if len(_parts) >= 2:
-                            _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
-                            _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                            cid = (_payload.get('companyid') or _payload.get('company_id')
-                                   or _payload.get('cid') or _payload.get('sub'))
+                        _r_cli = requests.get("https://www.evoliz.io/api/v1/clients",
+                                              headers=h, params={"per_page": 1, "page": 1}, timeout=5)
+                        if _r_cli.status_code == 200:
+                            _items = _r_cli.json().get('data', [])
+                            if _items:
+                                cid = (_items[0].get('companyid') or _items[0].get('company_id')
+                                       or (_items[0].get('company') or {}).get('companyid'))
                     except Exception:
                         pass
-                    # Fallback : payload login (au cas ou)
+
+                    # 2) Fallback : JWT decode (sub = Customer number Evoliz)
+                    if not cid:
+                        try:
+                            import base64 as _b64, json as _jsn
+                            _tok = login_data.get('access_token', '')
+                            _parts = _tok.split('.')
+                            if len(_parts) >= 2:
+                                _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
+                                _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                                cid = (_payload.get('companyid') or _payload.get('company_id')
+                                       or _payload.get('cid') or _payload.get('sub'))
+                        except Exception:
+                            pass
+                    # 3) Fallback : payload login
                     if not cid:
                         cid = (login_data.get('companyid') or login_data.get('company_id')
                                or (login_data.get('company') or {}).get('companyid'))
@@ -683,14 +698,13 @@ with m2:
                     if _co_error:
                         st.info(f"GET /companies : {_co_error}")
                     if cid:
-                        # Recuperer le nom du dossier. Selon l'API Evoliz company_users :
-                        # GET /companies/{cid} peut retourner 403, mais GET /companies/{cid}/settings
-                        # ou /settings/features/etc contiennent parfois le nom. On tente plusieurs endpoints.
                         _co_name = f"Dossier {cid}"
                         _name_found = False
+                        # Multi strategies : GET /companies (liste), /companies/{cid} (detail), /api/v1/company
                         for _url_tpl in [
                             f"https://www.evoliz.io/api/v1/companies/{cid}",
                             "https://www.evoliz.io/api/v1/companies",
+                            "https://www.evoliz.io/api/v1/company",  # singulier : certaines versions de l'API
                         ]:
                             try:
                                 _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
@@ -876,11 +890,16 @@ with m2:
     # Chargement auto dès qu'un dossier est sélectionné et que les données sont vides
     _should_load = _h and _cid and _data_empty
     if _should_load:
-        # Une fois le dossier selectionne (mono ou multi), le code utilise UNIFORMEMENT
-        # le prefixe /companies/{cid}/ qui est accepte par les deux types de cle.
-        # (Evoliz : prefixe requis pour prescriber_users, optionnel pour company_users.)
-        _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
-        _cid_for_fetch = _cid
+        # Pour company_users (mono) : certains endpoints refusent le prefixe /companies/{cid}/
+        #   -> on utilise /api/v1/{endpoint} (prefixe optionnel selon doc Evoliz)
+        # Pour prescriber_users (multi) : le prefixe est requis.
+        _mode = st.session_state.get("_key_mode", "multi")
+        if _mode == "mono":
+            _base = "https://www.evoliz.io/api/v1"
+            _cid_for_fetch = None  # fetch_evoliz_data utilisera /api/v1/{endpoint} sans prefixe
+        else:
+            _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
+            _cid_for_fetch = _cid
 
         def _fetch_paginated(endpoint, headers, params_extra=None):
             """Lecture paginée d'un endpoint Evoliz (thread-safe)."""
