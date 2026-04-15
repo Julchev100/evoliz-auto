@@ -765,18 +765,6 @@ with m2:
         _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
         if _current:
             st.info(f"📂 Dossier actif : **{_get_company_label(_current)}** (ID: {_cid})")
-            # Saisie manuelle du nom pour company_users (API Evoliz ne l'expose pas)
-            if st.session_state.get("_key_mode") == "mono":
-                _manual_name = st.text_input(
-                    "📝 Nom du dossier (libre, pour affichage)",
-                    value=_current.get('company_name', 'Mon dossier'),
-                    key="manual_co_name",
-                )
-                if _manual_name and _manual_name != _current.get('company_name'):
-                    _current['company_name'] = _manual_name
-                    _current['name'] = _manual_name
-                    st.session_state.companies_list[0]['company_name'] = _manual_name
-                    st.session_state.companies_list[0]['name'] = _manual_name
                 # Bouton manuel pour tester GET /companies/{cid}
                 if st.button(f"🔄 Retenter la recuperation du nom via /companies/{_cid}", key="btn_refetch_name"):
                     try:
