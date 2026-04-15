@@ -263,7 +263,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
         return False, str(e)
 
 st.title("🍌 Banana Import Club")
-st.caption("Version **v2026.04.15-auth-v9** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
+st.caption("Version **v2026.04.15-auth-v10** — dossier mono OK, import fichier OK meme sans nom.")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
