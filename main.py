@@ -588,29 +588,27 @@ with m2:
 
                 _companies = []
                 _co_error = None
-                # Tentative GET /companies uniquement si la cle est jugee multi (ou inconnu)
-                if _is_multi or not _is_mono:
-                    try:
-                        _pg = 1
-                        while True:
-                            r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
-                                                params={"per_page": 100, "page": _pg}, timeout=15)
-                            if r_co.status_code == 200:
-                                _d = r_co.json()
-                                _companies.extend(_d.get('data', []))
-                                if _pg >= _d.get("meta", {}).get("last_page", 1):
-                                    break
-                                _pg += 1
-                            elif r_co.status_code == 403:
-                                _co_error = "scope prescriber_users absent — bascule en mode mono-dossier"
-                                _is_mono = True; _is_multi = False
-                                st.session_state["_key_mode"] = "mono"
+                # Selon doc Evoliz : GET /companies fonctionne pour les 2 types de cles.
+                # Pour company_users, renvoie 1 seul dossier. Pour prescriber_users, la liste complete.
+                try:
+                    _pg = 1
+                    while True:
+                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
+                                            params={"per_page": 100, "page": _pg}, timeout=15)
+                        if r_co.status_code == 200:
+                            _d = r_co.json()
+                            _companies.extend(_d.get('data', []))
+                            if _pg >= _d.get("meta", {}).get("last_page", 1):
                                 break
-                            else:
-                                _co_error = f"HTTP {r_co.status_code}"
-                                break
-                    except Exception as e:
-                        _co_error = str(e)
+                            _pg += 1
+                        elif r_co.status_code == 403:
+                            _co_error = f"HTTP 403 sur /companies — sera tente via JWT sub"
+                            break
+                        else:
+                            _co_error = f"HTTP {r_co.status_code} sur /companies"
+                            break
+                except Exception as e:
+                    _co_error = str(e)
                 st.session_state.companies_list = _companies
                 if len(_companies) == 1:
                     st.session_state.company_id_105 = _companies[0].get('companyid') or _companies[0].get('id')
@@ -707,31 +705,42 @@ with m2:
                     if _co_error:
                         st.info(f"GET /companies : {_co_error}")
                     if cid:
-                        # Tenter de recuperer le nom du dossier via plusieurs endpoints
-                        # (company_users n'a souvent pas acces a /companies/{cid} directement)
+                        # Tenter de recuperer le nom via GET /companies (sans cid) qui pour company_users
+                        # renvoie la/les company(s) visible(s). Selon doc Evoliz : le prefixe company est optionnel.
                         _co_name = f"Dossier {cid}"
                         _name_found = False
                         for _url_tpl in [
+                            "https://www.evoliz.io/api/v1/companies",  # liste (devrait renvoyer 1 item pour company_users)
                             f"https://www.evoliz.io/api/v1/companies/{cid}",
-                            f"https://www.evoliz.io/api/v1/companies/{cid}/settings/features",
-                            f"https://www.evoliz.io/api/v1/companies/{cid}/settings/pdf",
-                            f"https://www.evoliz.io/api/v1/companies/{cid}/clients?per_page=1",
+                            "https://www.evoliz.io/api/v1/settings/features",
+                            f"https://www.evoliz.io/api/v1/clients?per_page=1",  # un client contient le nom de l'entreprise indirectement
                         ]:
                             try:
                                 _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
                                 if _r_cn.status_code == 200:
                                     _body = _r_cn.json() if _r_cn.text else {}
-                                    # Essayer plusieurs chemins pour recuperer le nom
-                                    for _obj in [_body, _body.get("data"),
-                                                 (_body.get("data") or [{}])[0] if isinstance(_body.get("data"), list) else None,
-                                                 _body.get("company")]:
-                                        if not isinstance(_obj, dict): continue
-                                        _n = (_obj.get("company_name") or _obj.get("name")
-                                              or (_obj.get("company") or {}).get("company_name")
-                                              or (_obj.get("company") or {}).get("name"))
+                                    # Pour GET /companies, data est une liste
+                                    _data_val = _body.get("data") if isinstance(_body, dict) else None
+                                    if isinstance(_data_val, list) and _data_val:
+                                        _obj = _data_val[0]
+                                        _n = _obj.get("company_name") or _obj.get("name")
+                                        if _n:
+                                            _co_name = _n; _name_found = True
+                                            # Si le companyid est present, le recuperer aussi (cas du GET /companies)
+                                            _real_cid = _obj.get("companyid") or _obj.get("id")
+                                            if _real_cid and _url_tpl.endswith("/companies"):
+                                                cid = _real_cid
+                                            break
+                                    # Sinon data est un objet
+                                    if isinstance(_data_val, dict):
+                                        _n = _data_val.get("company_name") or _data_val.get("name")
                                         if _n:
                                             _co_name = _n; _name_found = True; break
-                                    if _name_found: break
+                                    # Ou racine
+                                    if isinstance(_body, dict):
+                                        _n = _body.get("company_name") or _body.get("name")
+                                        if _n:
+                                            _co_name = _n; _name_found = True; break
                             except Exception:
                                 pass
                         # Construire une entree dans companies_list pour permettre les appels scoped
@@ -847,6 +856,47 @@ with m2:
         if _current:
             st.info(f"📂 Dossier actif : **{_get_company_label(_current)}** (ID: {_cid})")
 
+    # --- Diagnostic API (utile pour debug company_users) ---
+    if _cid and st.session_state.token_headers_105:
+        with st.expander("🔬 Diagnostic API (tester les endpoints)", expanded=False):
+            if st.button("▶️ Tester les endpoints", key="btn_api_diag"):
+                _h_diag = st.session_state.token_headers_105
+                _diag_results = []
+                _test_urls = [
+                    # Endpoints avec prefixe company
+                    f"https://www.evoliz.io/api/v1/companies/{_cid}",
+                    f"https://www.evoliz.io/api/v1/companies/{_cid}/clients?per_page=1",
+                    f"https://www.evoliz.io/api/v1/companies/{_cid}/articles?per_page=1",
+                    f"https://www.evoliz.io/api/v1/companies/{_cid}/accounts?per_page=1",
+                    f"https://www.evoliz.io/api/v1/companies/{_cid}/suppliers?per_page=1",
+                    # Endpoints globaux (sans prefixe)
+                    "https://www.evoliz.io/api/v1/companies",
+                    "https://www.evoliz.io/api/v1/clients?per_page=1",
+                    "https://www.evoliz.io/api/v1/articles?per_page=1",
+                    "https://www.evoliz.io/api/v1/accounts?per_page=1",
+                ]
+                for _url in _test_urls:
+                    try:
+                        _r = requests.get(_url, headers=_h_diag, timeout=8)
+                        _short = _url.replace("https://www.evoliz.io/api/v1/", "")
+                        _excerpt = ""
+                        if _r.status_code == 200:
+                            try:
+                                _j = _r.json()
+                                if isinstance(_j, dict):
+                                    if "data" in _j:
+                                        _excerpt = f"{len(_j.get('data', []))} items" if isinstance(_j['data'], list) else "data object"
+                                    else:
+                                        _excerpt = f"keys: {', '.join(list(_j.keys())[:5])}"
+                            except Exception:
+                                _excerpt = f"body: {_r.text[:60]}"
+                        else:
+                            _excerpt = _r.text[:80]
+                        _diag_results.append({"URL": _short, "Status": _r.status_code, "Detail": _excerpt})
+                    except Exception as e:
+                        _diag_results.append({"URL": _url, "Status": "ERR", "Detail": str(e)[:80]})
+                st.dataframe(pd.DataFrame(_diag_results), use_container_width=True, hide_index=True)
+
     # --- Bloc 3 : Chargement des données ---
     _is_multi = len(st.session_state.get('companies_list', [])) > 1
     _cid = st.session_state.company_id_105
@@ -855,7 +905,16 @@ with m2:
     # Chargement auto dès qu'un dossier est sélectionné et que les données sont vides
     _should_load = _h and _cid and _data_empty
     if _should_load:
-        _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
+        # Pour company_users (mono), le prefixe /companies/{cid}/ est OPTIONNEL et doit
+        # etre OMIS (sinon certains endpoints refusent). Pour prescriber_users (multi),
+        # le prefixe est REQUIS.
+        _mode = st.session_state.get("_key_mode", "multi")
+        if _mode == "mono":
+            _base = "https://www.evoliz.io/api/v1"
+            _cid_for_fetch = None  # pas de prefixe /companies/{cid}/ dans fetch_evoliz_data
+        else:
+            _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
+            _cid_for_fetch = _cid
 
         def _fetch_paginated(endpoint, headers, params_extra=None):
             """Lecture paginée d'un endpoint Evoliz (thread-safe)."""
@@ -876,11 +935,11 @@ with m2:
 
             # 8 tâches en parallèle : 5 compta + clients + articles + factures
             _load_tasks = {
-                "accounts": ("accounts", _h, _cid, None),
-                "purchase-classifications": ("purchase-classifications", _h, _cid, None),
-                "sale-classifications": ("sale-classifications", _h, _cid, None),
-                "sale-affectations": ("sale-affectations", _h, _cid, None),
-                "purchase-affectations": ("purchase-affectations", _h, _cid, None),
+                "accounts": ("accounts", _h, _cid_for_fetch, None),
+                "purchase-classifications": ("purchase-classifications", _h, _cid_for_fetch, None),
+                "sale-classifications": ("sale-classifications", _h, _cid_for_fetch, None),
+                "sale-affectations": ("sale-affectations", _h, _cid_for_fetch, None),
+                "purchase-affectations": ("purchase-affectations", _h, _cid_for_fetch, None),
                 "clients": (f"{_base}/clients", _h, None, None),
                 "articles": (f"{_base}/articles", _h, None, None),
                 "invoices": (f"{_base}/invoices", _h, None, None),
