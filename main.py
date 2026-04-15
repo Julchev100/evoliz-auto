@@ -874,7 +874,12 @@ with m2:
                       or st.session_state.get("ev_articles_raw")
                       or st.session_state.get("ev_invoices_raw"))
     if _has_any_data:
-        with st.expander("📊 Données lues depuis Evoliz", expanded=True):
+        # Nom du dossier actif affiche dans le titre de l'expander
+        _cid_disp = st.session_state.company_id_105
+        _co_list_disp = st.session_state.get("companies_list", [])
+        _co_disp = next((c for c in _co_list_disp if (c.get('companyid') or c.get('id')) == _cid_disp), None)
+        _co_nm = (_co_disp or {}).get("company_name") or (_co_disp or {}).get("name") or f"Dossier {_cid_disp}"
+        with st.expander(f"📊 Données lues depuis Evoliz — **{_co_nm}** (ID: {_cid_disp})", expanded=True):
             cc1, cc2, cc3 = st.columns(3)
             cc1.metric("👥 Clients", len(st.session_state.get("ev_clients_raw", [])))
             cc2.metric("📦 Articles", len(st.session_state.get("ev_articles_raw", [])))
