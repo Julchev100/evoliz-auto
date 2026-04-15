@@ -263,7 +263,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
         return False, str(e)
 
 st.title("🍌 Banana Import Club")
-st.caption("Version **v2026.04.15-auth-v6** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
+st.caption("Version **v2026.04.15-auth-v7** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -683,22 +683,29 @@ with m2:
                     except Exception as _ex:
                         _diag_steps.append({"step": "GET /api/v1/companies", "error": str(_ex)[:200]})
 
-                    # Si pas de cid -> fallback JWT sub
+                    # Si pas de cid -> probe ressources scoped pour extraire le vrai companyid
                     if not cid:
-                        try:
-                            import base64 as _b64, json as _jsn
-                            _tok_str = login_data.get("access_token", "")
-                            _parts = _tok_str.split(".")
-                            if len(_parts) >= 2:
-                                _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
-                                _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                                _sub = _payload.get("sub")
-                                if _sub:
-                                    try: cid = int(_sub)
-                                    except (TypeError, ValueError): cid = _sub
-                                    _diag_steps.append({"step": "JWT sub fallback -> cid", "cid": cid})
-                        except Exception as _ex:
-                            _diag_steps.append({"step": "JWT decode", "error": str(_ex)[:200]})
+                        for _res in ("clients", "articles", "suppliers", "buys", "invoices", "quotes", "payments"):
+                            try:
+                                _r_res = requests.get(f"https://www.evoliz.io/api/v1/{_res}",
+                                                       headers=_h_full, params={"per_page": 1, "page": 1}, timeout=5)
+                                _body_r = _r_res.text[:400]
+                                _diag_steps.append({"step": f"GET /{_res}", "status": _r_res.status_code,
+                                                     "body": _body_r})
+                                if _r_res.status_code == 200:
+                                    _items = _r_res.json().get('data', [])
+                                    if _items:
+                                        _it = _items[0]
+                                        # Chercher companyid dans multiples champs + nested
+                                        _cand = (_it.get('companyid') or _it.get('company_id')
+                                                  or (_it.get('company') or {}).get('companyid')
+                                                  or (_it.get('company') or {}).get('id'))
+                                        if _cand:
+                                            cid = _cand
+                                            _diag_steps.append({"step": f"cid trouve dans {_res}[0]", "cid": cid})
+                                            break
+                            except Exception as _ex:
+                                _diag_steps.append({"step": f"GET /{_res}", "error": str(_ex)[:200]})
 
                     # Si on a un cid mais pas de nom -> GET /companies/{cid}
                     if cid and not _co_name:
