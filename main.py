@@ -618,128 +618,57 @@ with m2:
                     st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
                 else:
                     # Pas de scope prescriber_users -> token company_users (mono-dossier)
-                    st.info("🔐 **Cle client (company_users)** detectee. Recherche du companyid...")
-                    _status = st.empty()
+                    # Direct : on lit le companyid depuis le JWT (sub = Customer number Evoliz)
                     cid = None
-
-                    with st.spinner("Detection du companyid..."):
-                        # 1) Chercher dans le payload login
-                        _status.caption("1/4 — lecture du payload login...")
-                        cid = (login_data.get('companyid')
-                               or login_data.get('company_id')
-                               or login_data.get('companyId')
-                               or (login_data.get('company') or {}).get('companyid')
-                               or (login_data.get('company') or {}).get('id')
-                               or (login_data.get('user') or {}).get('companyid'))
-
-                        # 2) Probe endpoints self (timeout court)
-                        if not cid:
-                            _status.caption("2/4 — test des endpoints self...")
-                            for _probe in ["account", "self", "user", "users/me", "me", "profile", "company"]:
-                                try:
-                                    _r_probe = requests.get(f"https://www.evoliz.io/api/v1/{_probe}", headers=h, timeout=5)
-                                    if _r_probe.status_code == 200:
-                                        _dp = _r_probe.json()
-                                        _data_obj = _dp.get('data') if isinstance(_dp, dict) else None
-                                        for _obj in [_dp, _data_obj, (_dp.get('company') or {}) if isinstance(_dp, dict) else {}]:
-                                            if not isinstance(_obj, dict): continue
-                                            for _k in ('companyid', 'company_id', 'companyId', 'id'):
-                                                if _obj.get(_k) and str(_obj.get(_k)).isdigit():
-                                                    cid = _obj.get(_k); break
-                                            if cid: break
-                                        if cid: break
-                                except Exception:
-                                    pass
-
-                        # 3) Probe ressources scoped (/clients/buys) = contiennent le companyid
-                        if not cid:
-                            _status.caption("3/4 — lecture d'une ressource scoped (clients/buys)...")
-                            for _res in ["clients", "buys", "articles", "suppliers"]:
-                                try:
-                                    _r_res = requests.get(f"https://www.evoliz.io/api/v1/{_res}", headers=h, params={"per_page": 1, "page": 1}, timeout=5)
-                                    if _r_res.status_code == 200:
-                                        _items = _r_res.json().get('data', [])
-                                        if _items:
-                                            cid = (_items[0].get('companyid') or _items[0].get('company_id')
-                                                   or (_items[0].get('company') or {}).get('companyid'))
-                                            if cid: break
-                                except Exception:
-                                    pass
-
-                        # 4) Decodage JWT : pour company_users, le champ `sub` contient le companyid (Customer number)
-                        if not cid:
-                            _status.caption("4/4 — decodage du JWT (sub = companyid)...")
-                            try:
-                                import base64 as _b64, json as _jsn
-                                _tok = login_data.get('access_token', '')
-                                _parts = _tok.split('.')
-                                if len(_parts) >= 2:
-                                    _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
-                                    _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                                    # Candidat = sub (Customer number Evoliz pour company_users)
-                                    _candidate = (_payload.get('companyid') or _payload.get('company_id')
-                                                   or _payload.get('cid') or _payload.get('company')
-                                                   or _payload.get('sub'))
-                                    # Valider : tester plusieurs endpoints avec ce cid
-                                    if _candidate:
-                                        _validated = False
-                                        for _val_url in [
-                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}/clients?per_page=1",
-                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}/articles?per_page=1",
-                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}",
-                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}/settings/features",
-                                        ]:
-                                            try:
-                                                _r_val = requests.get(_val_url, headers=h, timeout=5)
-                                                if _r_val.status_code in (200, 201):
-                                                    cid = _candidate; _validated = True; break
-                                            except Exception:
-                                                pass
-                                        # Si aucune validation mais candidat present, on l'utilise quand meme
-                                        if not _validated:
-                                            cid = _candidate
-                            except Exception:
-                                pass
+                    try:
+                        import base64 as _b64, json as _jsn
+                        _tok = login_data.get('access_token', '')
+                        _parts = _tok.split('.')
+                        if len(_parts) >= 2:
+                            _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
+                            _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                            cid = (_payload.get('companyid') or _payload.get('company_id')
+                                   or _payload.get('cid') or _payload.get('sub'))
+                    except Exception:
+                        pass
+                    # Fallback : payload login (au cas ou)
+                    if not cid:
+                        cid = (login_data.get('companyid') or login_data.get('company_id')
+                               or (login_data.get('company') or {}).get('companyid'))
 
                     st.session_state.company_id_105 = cid
                     if _co_error:
                         st.info(f"GET /companies : {_co_error}")
                     if cid:
-                        # Tenter de recuperer le nom via GET /companies (sans cid) qui pour company_users
-                        # renvoie la/les company(s) visible(s). Selon doc Evoliz : le prefixe company est optionnel.
-                        # IMPORTANT : ne consulter QUE les endpoints /companies, car d'autres endpoints (clients, users)
-                        # contiennent un champ "name" qui ne correspond PAS au nom de la societe.
+                        # Recuperer le nom du dossier. Selon l'API Evoliz company_users :
+                        # GET /companies/{cid} peut retourner 403, mais GET /companies/{cid}/settings
+                        # ou /settings/features/etc contiennent parfois le nom. On tente plusieurs endpoints.
                         _co_name = f"Dossier {cid}"
                         _name_found = False
                         for _url_tpl in [
-                            "https://www.evoliz.io/api/v1/companies",            # liste -> renvoie 1 item pour company_users
-                            f"https://www.evoliz.io/api/v1/companies/{cid}",     # detail du dossier
+                            f"https://www.evoliz.io/api/v1/companies/{cid}",
+                            "https://www.evoliz.io/api/v1/companies",
                         ]:
                             try:
                                 _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
                                 if _r_cn.status_code != 200:
                                     continue
                                 _body = _r_cn.json() if _r_cn.text else {}
-                                _data_val = _body.get("data") if isinstance(_body, dict) else None
-                                # GET /companies -> data = liste d'objets company
-                                if isinstance(_data_val, list) and _data_val:
-                                    _obj = _data_val[0]
-                                    _n = _obj.get("company_name")  # champ specifique Evoliz
+                                _dv = _body.get("data") if isinstance(_body, dict) else None
+                                _obj = None
+                                if isinstance(_dv, list) and _dv:
+                                    _obj = _dv[0]
+                                elif isinstance(_dv, dict):
+                                    _obj = _dv
+                                elif isinstance(_body, dict) and _body.get("company_name"):
+                                    _obj = _body
+                                if isinstance(_obj, dict):
+                                    _n = _obj.get("company_name")
                                     if _n:
                                         _co_name = _n; _name_found = True
-                                        # Recuperer aussi le companyid reel (JWT sub peut etre user-id)
                                         _real_cid = _obj.get("companyid") or _obj.get("id")
-                                        if _real_cid:
-                                            cid = _real_cid
+                                        if _real_cid: cid = _real_cid
                                         break
-                                # GET /companies/{cid} -> data = objet company
-                                if isinstance(_data_val, dict):
-                                    _n = _data_val.get("company_name")
-                                    if _n:
-                                        _co_name = _n; _name_found = True; break
-                                # Reponse a la racine (sans wrap data)
-                                if isinstance(_body, dict) and _body.get("company_name"):
-                                    _co_name = _body["company_name"]; _name_found = True; break
                             except Exception:
                                 pass
                         # Construire une entree dans companies_list pour permettre les appels scoped
