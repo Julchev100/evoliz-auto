@@ -655,20 +655,24 @@ with m2:
                     # --- MODE MONO (company_users) ---
                     cid = None
                     _co_name = None
-                    # 1) Tentative GET /companies (liste) : peut renvoyer le dossier avec son nom
+                    _diag_steps = []
+
+                    # 1) GET /companies (liste)
                     try:
                         _r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
                                               params={"per_page": 100, "page": 1}, timeout=10)
+                        _diag_steps.append({"step": "GET /companies", "status": _r_co.status_code,
+                                             "body": _r_co.text[:300]})
                         if _r_co.status_code == 200:
                             _items = _r_co.json().get("data", [])
                             if _items:
                                 _first = _items[0]
                                 cid = _first.get("companyid") or _first.get("id")
                                 _co_name = _first.get("company_name")
-                    except Exception:
-                        pass
+                    except Exception as _ex:
+                        _diag_steps.append({"step": "GET /companies", "error": str(_ex)[:200]})
 
-                    # 2) Fallback : JWT sub si GET /companies a echoue
+                    # 2) Fallback JWT sub si pas de cid
                     if not cid:
                         try:
                             import base64 as _b64, json as _jsn
@@ -681,27 +685,38 @@ with m2:
                                 if _sub:
                                     try: cid = int(_sub)
                                     except (TypeError, ValueError): cid = _sub
+                                    _diag_steps.append({"step": "JWT sub", "cid": cid})
                         except Exception as _ex:
-                            st.error(f"Erreur decodage JWT : {_ex}")
+                            _diag_steps.append({"step": "JWT decode", "error": str(_ex)[:200]})
 
-                    # 3) Si toujours pas de nom : tenter GET /companies/{cid}
+                    # 3) GET /companies/{cid} pour le nom
                     if cid and not _co_name:
                         try:
                             _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
                                                   headers=h, timeout=10)
+                            _diag_steps.append({"step": f"GET /companies/{cid}", "status": _r_cn.status_code,
+                                                 "body": _r_cn.text[:300]})
                             if _r_cn.status_code == 200:
                                 _body = _r_cn.json()
                                 _obj = _body.get("data") if isinstance(_body, dict) else None
                                 if not isinstance(_obj, dict):
                                     _obj = _body if isinstance(_body, dict) else {}
                                 _co_name = _obj.get("company_name")
-                        except Exception:
-                            pass
+                        except Exception as _ex:
+                            _diag_steps.append({"step": f"GET /companies/{cid}", "error": str(_ex)[:200]})
+
+                    st.session_state["_login_diag"] = _diag_steps
 
                     if not cid:
-                        st.error("❌ Impossible d'extraire le companyid (GET /companies en erreur ET JWT sub absent).")
+                        st.error("❌ Impossible d'extraire le companyid.")
+                        with st.expander("🔬 Diagnostic", expanded=True):
+                            st.json(_diag_steps)
                     else:
-                        _co_name = _co_name or f"Dossier {cid}"
+                        if not _co_name:
+                            _co_name = f"Dossier {cid}"
+                            st.warning(f"⚠️ Nom du dossier non recuperable via API (tous les endpoints /companies ont echoue). Voir diagnostic.")
+                            with st.expander("🔬 Diagnostic recuperation nom", expanded=True):
+                                st.json(_diag_steps)
                         st.session_state.company_id_105 = cid
                         st.session_state.companies_list = [{
                             "companyid": cid,
