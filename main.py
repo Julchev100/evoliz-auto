@@ -550,8 +550,7 @@ with m2:
         for _k in (
             'token_headers_105', 'company_id_105', 'companies_list',
             'ev_acc_105', 'ev_data_105', 'ev_clients_raw', 'ev_articles_raw', 'ev_invoices_raw',
-            '_key_mode', 'audit_matrix_105', 'rejets_105', 'prot_105',
-            'eraz_counts', 'eraz_items', 'eraz_log', 'sync_log',
+            '_key_mode', 'eraz_log', 'sync_log',
             '_art_consol', '_art_consol_stats', '_art_sale_cl', '_art_consol_id',
             '_art_pdf_rows', '_art_pdf_raw', '_art_pdf_extracted_rows',
             '_art_pending_classifs', '_art_hidden_cols',
@@ -563,7 +562,6 @@ with m2:
             '_bal_analysed_id', '_synth_modif', '_skip_delete', '_skip_create',
         ):
             if _k in st.session_state:
-                # Reset au bon type (dict, list, set, str, None)
                 _v = st.session_state[_k]
                 if isinstance(_v, dict): st.session_state[_k] = {}
                 elif isinstance(_v, list): st.session_state[_k] = []
@@ -571,9 +569,14 @@ with m2:
                 elif isinstance(_v, bool): st.session_state[_k] = False
                 elif isinstance(_v, int): st.session_state[_k] = 0
                 else: st.session_state[_k] = None
-        # Reset specifique (valeurs par defaut attendues ailleurs)
+        # Reset specifique aux types particuliers (DataFrames, dict structures)
         st.session_state.ev_data_105 = {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}
         st.session_state.token_headers_105 = {}
+        st.session_state.audit_matrix_105 = pd.DataFrame()
+        st.session_state.rejets_105 = pd.DataFrame()
+        st.session_state.prot_105 = set()
+        st.session_state.eraz_counts = {"COMPTE": 0, "ACHAT": 0, "VENTE": 0, "ENTRÉE BQ": 0, "SORTIE BQ": 0}
+        st.session_state.eraz_items = {}
         st.info("🔄 Cle API modifiee — donnees precedentes effacees. Reconnectez-vous.")
         st.session_state["_prev_pk_105"] = pk_105
         st.session_state["_prev_sk_105"] = sk_105
