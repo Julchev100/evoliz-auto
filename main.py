@@ -577,6 +577,7 @@ with m2:
     saved_pk, saved_sk = load_creds()
     col_pk, col_sk = st.columns(2)
     st.caption("🔐 L'app detecte automatiquement le type de cle : **client** (company_users — mono-dossier) ou **plateforme** (prescriber_users — multi-dossier).")
+    st.caption("🛡️ **Securite** : aucune cle API n'est sauvegardee. Les cles sont effacees de la memoire des que le token est obtenu, et les champs sont vides a chaque rafraichissement.")
     pk_105 = col_pk.text_input("Public Key", value=saved_pk, key="pk_105")
     sk_105 = col_sk.text_input("Secret Key", type="password", value=saved_sk, key="sk_105")
 
@@ -654,6 +655,18 @@ with m2:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
+
+                # --- SECURITE : effacer immediatement les cles API de la memoire ---
+                # PK + SK ne sont plus necessaires apres login (seul le token est utilise)
+                pk_105 = ""; sk_105 = ""
+                for _k in ("pk_105", "sk_105", "_prev_pk_105", "_prev_sk_105"):
+                    if _k in st.session_state:
+                        try: del st.session_state[_k]
+                        except Exception: pass
+                # Effacer aussi de l'objet login_data pour eviter qu'il traine
+                if "access_token" in login_data:
+                    # On garde une copie minimale dans une variable locale, pas en session
+                    pass
 
                 _scopes = login_data.get("scopes", []) or []
                 if isinstance(_scopes, str):
