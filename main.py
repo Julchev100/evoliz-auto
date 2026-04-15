@@ -541,6 +541,46 @@ with m2:
     pk_105 = col_pk.text_input("Public Key", value=saved_pk, key="pk_105")
     sk_105 = col_sk.text_input("Secret Key", type="password", value=saved_sk, key="sk_105")
 
+    # --- Detection du changement de cle : vider toutes les donnees API precedentes ---
+    _prev_pk = st.session_state.get("_prev_pk_105", "")
+    _prev_sk = st.session_state.get("_prev_sk_105", "")
+    _keys_changed = (pk_105 != _prev_pk or sk_105 != _prev_sk) and (_prev_pk or _prev_sk)
+    if _keys_changed:
+        # Vider toutes les donnees API/session relatives a l'ancien token
+        for _k in (
+            'token_headers_105', 'company_id_105', 'companies_list',
+            'ev_acc_105', 'ev_data_105', 'ev_clients_raw', 'ev_articles_raw', 'ev_invoices_raw',
+            '_key_mode', 'audit_matrix_105', 'rejets_105', 'prot_105',
+            'eraz_counts', 'eraz_items', 'eraz_log', 'sync_log',
+            '_art_consol', '_art_consol_stats', '_art_sale_cl', '_art_consol_id',
+            '_art_pdf_rows', '_art_pdf_raw', '_art_pdf_extracted_rows',
+            '_art_pending_classifs', '_art_hidden_cols',
+            '_four_consol', '_four_consol_stats', '_four_sirene_cells', '_four_sirene_result',
+            '_2eme_lame_four_props', '_2eme_lame_four_result',
+            'meg_df_clients', 'meg_sirene_cells', 'meg_sirene_info', 'meg_sirene_log',
+            'meg_sirene_stats', 'meg_enrichir_flags', 'meg_sirene_suggestions',
+            '_2eme_lame_props', '_2eme_lame_result',
+            '_bal_analysed_id', '_synth_modif', '_skip_delete', '_skip_create',
+        ):
+            if _k in st.session_state:
+                # Reset au bon type (dict, list, set, str, None)
+                _v = st.session_state[_k]
+                if isinstance(_v, dict): st.session_state[_k] = {}
+                elif isinstance(_v, list): st.session_state[_k] = []
+                elif isinstance(_v, set): st.session_state[_k] = set()
+                elif isinstance(_v, bool): st.session_state[_k] = False
+                elif isinstance(_v, int): st.session_state[_k] = 0
+                else: st.session_state[_k] = None
+        # Reset specifique (valeurs par defaut attendues ailleurs)
+        st.session_state.ev_data_105 = {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}
+        st.session_state.token_headers_105 = {}
+        st.info("🔄 Cle API modifiee — donnees precedentes effacees. Reconnectez-vous.")
+        st.session_state["_prev_pk_105"] = pk_105
+        st.session_state["_prev_sk_105"] = sk_105
+        st.rerun()
+    st.session_state["_prev_pk_105"] = pk_105
+    st.session_state["_prev_sk_105"] = sk_105
+
     # --- Bloc 1 : Login (récupère le token + liste des dossiers accessibles) ---
     auto_connect = not st.session_state.token_headers_105 and saved_pk and saved_sk
     # Toujours rendre le bouton (même si auto_connect va le déclencher)
@@ -833,16 +873,11 @@ with m2:
     # Chargement auto dès qu'un dossier est sélectionné et que les données sont vides
     _should_load = _h and _cid and _data_empty
     if _should_load:
-        # Pour company_users (mono), le prefixe /companies/{cid}/ est OPTIONNEL et doit
-        # etre OMIS (sinon certains endpoints refusent). Pour prescriber_users (multi),
-        # le prefixe est REQUIS.
-        _mode = st.session_state.get("_key_mode", "multi")
-        if _mode == "mono":
-            _base = "https://www.evoliz.io/api/v1"
-            _cid_for_fetch = None  # pas de prefixe /companies/{cid}/ dans fetch_evoliz_data
-        else:
-            _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
-            _cid_for_fetch = _cid
+        # Une fois le dossier selectionne (mono ou multi), le code utilise UNIFORMEMENT
+        # le prefixe /companies/{cid}/ qui est accepte par les deux types de cle.
+        # (Evoliz : prefixe requis pour prescriber_users, optionnel pour company_users.)
+        _base = f"https://www.evoliz.io/api/v1/companies/{_cid}"
+        _cid_for_fetch = _cid
 
         def _fetch_paginated(endpoint, headers, params_extra=None):
             """Lecture paginée d'un endpoint Evoliz (thread-safe)."""
