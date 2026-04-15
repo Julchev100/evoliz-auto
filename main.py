@@ -14,6 +14,12 @@ from datetime import datetime as dt_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import Workbook
 
+try:
+    import pdfplumber
+    _HAS_PDFPLUMBER = True
+except ImportError:
+    _HAS_PDFPLUMBER = False
+
 st.set_page_config(page_title="Banana Import Club", layout="wide", page_icon="🍌")
 
 # --- FONCTIONS DE NETTOYAGE ---
@@ -481,8 +487,22 @@ with m_import:
             _file_row("🏭 Fournisseurs", ["xlsx", "xls", "csv"], "imp_file_fournisseurs", "imp_fournisseurs")
         if mod_factures:
             _file_row("🧾 Factures", ["xlsx", "xls"], "imp_file_factures", "imp_factures")
-    if mod_articles:
-        _file_row("📦 Articles", ["xlsx", "xls"], "imp_file_articles", "imp_articles")
+        if mod_articles:
+            _file_row("📦 Articles (Excel)", ["xlsx", "xls"], "imp_file_articles", "imp_articles")
+            # Uploader PDF multi-fichiers pour les factures fournisseur (complete l'Excel)
+            _c1, _c2, _c3 = st.columns([1.5, 4, 1.5])
+            _c1.markdown("**📸 Factures PDF**")
+            _pdfs_art = _c2.file_uploader(
+                "Factures PDF articles", type=["pdf"], accept_multiple_files=True,
+                key="imp_articles_pdfs", label_visibility="collapsed",
+                help="Jusqu'a 100 factures PDF. Les lignes d'article seront extraites et fusionnees avec l'import Excel.",
+            )
+            if _pdfs_art:
+                st.session_state["imp_file_articles_pdfs"] = _pdfs_art
+                _c3.markdown(f"✅ {len(_pdfs_art)} PDF")
+            else:
+                _existing_pdfs = st.session_state.get("imp_file_articles_pdfs", [])
+                _c3.markdown(f"✅ {len(_existing_pdfs)} PDF" if _existing_pdfs else "❌ —")
 
 
 def load_param_from_excel(file_obj):
@@ -583,15 +603,57 @@ with m2:
                     st.session_state.company_id_105 = None
                     st.success(f"Connecté à Evoliz — {len(_companies)} dossiers accessibles. Sélectionnez un dossier ci-dessous.")
                 else:
-                    # Pas de scope prescriber_users ou token mono-dossier sans /companies
-                    cid = login_data.get('companyid')
+                    # Pas de scope prescriber_users -> token company_users (mono-dossier)
+                    # Chercher le companyid dans toutes les cles possibles du payload login
+                    cid = (login_data.get('companyid')
+                           or login_data.get('company_id')
+                           or login_data.get('companyId')
+                           or (login_data.get('company') or {}).get('companyid')
+                           or (login_data.get('company') or {}).get('id')
+                           or (login_data.get('user') or {}).get('companyid'))
+                    # Si toujours rien : tenter d'extraire du scope ou faire un GET qui revelera le cid
+                    if not cid:
+                        try:
+                            # Le scope company_users a acces a /api/v1/account ou /api/v1/self
+                            for _probe in ["account", "self", "user", "me"]:
+                                _r_probe = requests.get(f"https://www.evoliz.io/api/v1/{_probe}", headers=h, timeout=10)
+                                if _r_probe.status_code == 200:
+                                    _dp = _r_probe.json()
+                                    cid = (_dp.get('companyid') or _dp.get('company_id')
+                                           or (_dp.get('data') or {}).get('companyid')
+                                           or (_dp.get('company') or {}).get('companyid'))
+                                    if cid: break
+                        except Exception:
+                            pass
+                    # Dernier recours : decoder le JWT pour recuperer le cid
+                    if not cid:
+                        try:
+                            import base64 as _b64, json as _jsn
+                            _tok = login_data.get('access_token', '')
+                            _parts = _tok.split('.')
+                            if len(_parts) >= 2:
+                                _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
+                                _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                                cid = (_payload.get('companyid') or _payload.get('company_id')
+                                       or _payload.get('cid') or _payload.get('company'))
+                        except Exception:
+                            pass
+
                     st.session_state.company_id_105 = cid
                     if _co_error:
                         st.info(f"GET /companies : {_co_error}")
                     if cid:
-                        st.success(f"Connecté à Evoliz — mono-dossier (company: {cid})")
+                        # Construire une entree factice dans companies_list pour permettre les appels scoped
+                        st.session_state.companies_list = [{
+                            "companyid": cid,
+                            "company_name": f"Dossier {cid}",
+                            "name": f"Dossier {cid}",
+                        }]
+                        st.success(f"Connecté à Evoliz — mono-dossier (company_users, company: {cid})")
                     else:
-                        st.warning("Connecté mais aucun dossier détecté. Vérifiez les droits de vos clés API (scope prescriber_users requis pour le multi-dossier).")
+                        with st.expander("🔬 Diagnostic login (debug)", expanded=True):
+                            st.json(login_data)
+                        st.warning("Connecté mais aucun dossier détecté. Pour un token company_users, le companyid devrait figurer dans la reponse de login. Contactez le support Evoliz si le probleme persiste.")
             else:
                 st.error(f"Échec login : HTTP {r_log.status_code} — {r_log.text[:300]}")
         else:
@@ -3911,92 +3973,917 @@ with m_fac:
 with m_art:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
-    st.subheader("📦 Bascule Articles MEG")
-    art_mode = st.radio("Mode", ["Gabarit Excel","Envoi direct API Evoliz"], horizontal=True, key="art_mode")
+    st.subheader("📦 Articles — Injection API Evoliz")
     f_meg_art = st.session_state.get("imp_file_articles")
-    if not f_meg_art:
-        st.info("Importez d'abord un fichier articles dans l'onglet 📁 Import fichiers.")
-    if art_mode == "Gabarit Excel":
-        if f_meg_art and st.button("Generer Gabarit Article", key="btn_meg_art"):
-            with st.spinner("Traitement..."):
-                df=_read_meg(f_meg_art); st.dataframe(df.head(10),use_container_width=True)
-                wb_ar,ws_ar=_make_wb(H_ARTICLE); ari={h.split(" *")[0]:i for i,h in enumerate(H_ARTICLE)}
-                for _,row in df.iterrows():
-                    r=[None]*len(H_ARTICLE); r[ari["Reference"]]=to_clean_str(row.iloc[0]); r[ari["Designation"]]=to_clean_str(row.iloc[1])
-                    r[ari["Code Classification vente"]]=to_clean_str(row.iloc[4]) if len(row)>4 else ""
-                    r[ari["PU HT"]]=row.iloc[6] if len(row)>6 else ""; r[ari["TVA"]]=row.iloc[7] if len(row)>7 else ""
-                    ws_ar.append(r)
-                zb=io.BytesIO()
-                with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf: zf.writestr("Gabarit Article.xlsx",_wb_bytes(wb_ar))
-                zb.seek(0); st.success("Gabarit Article genere")
-                st.download_button("Telecharger le ZIP",data=zb.getvalue(),file_name="Gabarit_Article.zip",mime="application/zip",key="dl_meg_art")
-    else:
+    _pdfs_art_imp = st.session_state.get("imp_file_articles_pdfs", [])
+    if not f_meg_art and not _pdfs_art_imp:
+        st.info("Importez un fichier Excel et/ou des factures PDF dans l'onglet 📁 Import fichiers.")
+    if True:
         has_h = bool(st.session_state.token_headers_105)
-        if not has_h: st.warning("Connectez-vous d'abord a l'API Evoliz (onglet Balance & Cles API)")
-        if f_meg_art and has_h and st.button("Envoyer les articles vers Evoliz",type="primary",key="btn_meg_art_api"):
-            headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
-            if not cid: st.error("companyid non disponible. Reconnectez-vous.")
+        if not has_h:
+            st.warning("Connectez-vous d'abord a l'API Evoliz (onglet Balance & Cles API)")
+        elif f_meg_art or _pdfs_art_imp:
+            cid = st.session_state.company_id_105
+            headers = st.session_state.token_headers_105
+            if not cid:
+                st.error("companyid non disponible. Reconnectez-vous.")
             else:
-                df=_read_meg(f_meg_art); st.dataframe(df.head(10),use_container_width=True)
-                with st.spinner("Lecture articles et classifications existants..."):
-                    url_art=f"https://www.evoliz.io/api/v1/companies/{cid}/articles"
-                    existing={}; page=1
-                    while True:
-                        r=requests.get(url_art,headers=headers,params={"per_page":100,"page":page},timeout=15)
-                        if r.status_code!=200: break
-                        d=r.json()
-                        for it in d.get("data",[]):
-                            ref=(it.get("reference_clean") or it.get("reference") or "").strip().upper()
-                            if ref: existing[ref]=it.get("articleid")
-                        if page>=d.get("meta",{}).get("last_page",1): break
-                        page+=1
-                    sale_cl={}; url_sc=f"https://www.evoliz.io/api/v1/companies/{cid}/sale-classifications"; page=1
-                    while True:
-                        r=requests.get(url_sc,headers=headers,params={"per_page":100,"page":page},timeout=15)
-                        if r.status_code!=200: break
-                        d=r.json()
-                        for it in d.get("data",[]):
-                            c=str(it.get("code","")).strip().upper(); sid=it.get("classificationid") or it.get("id")
-                            if c and sid: sale_cl[c]=sid
-                        if page>=d.get("meta",{}).get("last_page",1): break
-                        page+=1
-                    st.info(f"{len(existing)} articles existants, {len(sale_cl)} classifications de vente")
-                articles=[]
-                for _,row in df.iterrows():
-                    ref=to_clean_str(row.iloc[0]); des=to_clean_str(row.iloc[1])
-                    if not ref and not des: continue
-                    art={"reference":ref or "NOREF","designation":des or ref}
-                    if len(row)>6:
-                        pu=_safe_float(row.iloc[6])
-                        if pu: art["unit_price"]=round(pu,2)
-                    if len(row)>7:
-                        tv=_safe_float(row.iloc[7])
-                        if tv: art["vat_rate"]=round(tv,2)
-                    if len(row)>4:
-                        cc=to_clean_str(row.iloc[4]).upper()
-                        if cc and cc in sale_cl: art["sale_classificationid"]=sale_cl[cc]
-                    articles.append(art)
-                if not articles: st.warning("Aucun article a envoyer.")
+                # L'Excel est optionnel : on peut partir d'une base vide si seuls les PDFs sont importes
+                if f_meg_art:
+                    df_art = _read_meg(f_meg_art)
+                    st.caption(f"Fichier Excel lu : **{len(df_art)} lignes**, **{len(df_art.columns)} colonnes**")
+                    st.dataframe(df_art.head(5), use_container_width=True, hide_index=True)
+                    _art_file_id = f_meg_art.name + str(len(df_art))
                 else:
-                    created=updated=0; errors=[]
-                    prog=st.progress(0,text="Envoi des articles...")
-                    for i,art in enumerate(articles):
-                        ru=art["reference"].upper()
-                        if ru in existing:
-                            r=requests.patch(f"{url_art}/{existing[ru]}",headers=headers,json=art,timeout=15)
-                            if r.status_code in (200,204): updated+=1
-                            else: errors.append(f"MAJ '{art['reference']}': HTTP {r.status_code}")
+                    df_art = pd.DataFrame()
+                    _art_file_id = f"pdf_only_{len(_pdfs_art_imp)}"
+                    st.caption(f"📸 **{len(_pdfs_art_imp)} PDF** importe(s) — pas d'Excel. Les lignes seront extraites via l'outil PDF.")
+
+                # Placeholder pour l'extraction PDF qui sera rendue AVANT la consolidation
+                # (le code de l'extraction se trouve plus bas mais affiche dans ce conteneur)
+                _pdf_container = st.container()
+
+                _art_already = st.session_state.get("_art_consol_id") == _art_file_id
+                _art_auto = not _art_already
+                _art_manual = st.button("🔄 Etape 2 — Consolider avec Evoliz", use_container_width=True, key="btn_consol_art")
+
+                if _art_auto or _art_manual:
+                    st.session_state["_art_consol_id"] = _art_file_id
+                    with st.spinner("Lecture articles et classifications Evoliz..."):
+                        url_art = f"https://www.evoliz.io/api/v1/companies/{cid}/articles"
+                        ev_articles = {}; page = 1
+                        while True:
+                            r = requests.get(url_art, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
+                            if r.status_code != 200: break
+                            d = r.json()
+                            for it in d.get("data", []):
+                                ref = (it.get("reference_clean") or it.get("reference") or "").strip().upper()
+                                if ref:
+                                    # On stocke la reponse API complete pour afficher tous les champs disponibles
+                                    _raw = dict(it)
+                                    _raw["_id"] = it.get("articleid")
+                                    ev_articles[ref] = _raw
+                            if page >= d.get("meta", {}).get("last_page", 1): break
+                            page += 1
+
+                        sale_cl = {}; sale_cl_by_id = {}; url_sc = f"https://www.evoliz.io/api/v1/companies/{cid}/sale-classifications"; page = 1
+                        while True:
+                            r = requests.get(url_sc, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
+                            if r.status_code != 200: break
+                            d = r.json()
+                            for it in d.get("data", []):
+                                c = str(it.get("code", "")).strip().upper()
+                                sid = it.get("classificationid") or it.get("id")
+                                lbl = it.get("label", "")
+                                if c and sid:
+                                    sale_cl[c] = sid
+                                    sale_cl_by_id[sid] = c
+                            if page >= d.get("meta", {}).get("last_page", 1): break
+                            page += 1
+
+                    # Consolidation : on fusionne les champs du fichier avec ceux de l'API
+                    # Mapping des champs API -> colonnes affichees (snake_case -> libelles lisibles)
+                    _field_map_api_to_display = {
+                        "reference": "Reference",
+                        "designation": "Designation",
+                        "unit_price": "PU HT",
+                        "vat_rate": "TVA %",
+                        # Les autres champs API seront ajoutes dynamiquement (voir plus bas)
+                    }
+                    # Champs API usuels a exposer (titres lisibles). Les autres champs API seront ajoutes dynamiquement.
+                    _api_extra_fields = {
+                        "brand": "Marque",
+                        "description": "Description",
+                        "note": "Note",
+                        "ean": "EAN / Code-barres",
+                        "unit": "Unite",
+                        "purchase_price": "Prix d'achat",
+                        "min_sale_price": "Prix mini",
+                        "supplier_reference": "Ref. fournisseur",
+                        "weight": "Poids",
+                        "height": "Hauteur", "width": "Largeur", "depth": "Profondeur",
+                        "stock_management": "Gestion stock",
+                    }
+
+                    # Preserver les entrees provenant des factures PDF (extraites avant consolidation)
+                    _prev_consol = st.session_state.get("_art_consol", [])
+                    _pdf_entries = [dict(a) for a in _prev_consol if str(a.get("_source", "")).startswith("📸")]
+
+                    consol_art = []; seen_art_ids = set()
+                    # 1) D'abord les lignes PDF (au debut de la liste)
+                    for _pdf_e in _pdf_entries:
+                        _rk_pdf = str(_pdf_e.get("Reference", "")).upper()
+                        if _rk_pdf in ev_articles and _rk_pdf != "NOREF":
+                            _ev = ev_articles[_rk_pdf]
+                            seen_art_ids.add(_ev["_id"])
+                            _pdf_e["_source"] = "📸+☁️ Doublon"
+                            _pdf_e["_entityid"] = _ev["_id"]
+                            for _api_f, _disp_f in _api_extra_fields.items():
+                                _v = _ev.get(_api_f)
+                                if _v not in (None, "") and not _pdf_e.get(_disp_f):
+                                    _pdf_e[_disp_f] = _v
+                        consol_art.append(_pdf_e)
+
+                    # 2) Puis les lignes Excel (en evitant les doublons avec les PDF deja ajoutes)
+                    _pdf_refs = {str(p.get("Reference", "")).upper() for p in _pdf_entries}
+                    for _, row in df_art.iterrows():
+                        ref = to_clean_str(row.iloc[0]); des = to_clean_str(row.iloc[1]) if len(row) > 1 else ""
+                        if not ref and not des: continue
+                        if ref.upper() in _pdf_refs: continue  # deja present via PDF
+                        pu = _safe_float(row.iloc[6]) if len(row) > 6 else None
+                        tv = _safe_float(row.iloc[7]) if len(row) > 7 else None
+                        cc = to_clean_str(row.iloc[4]).upper() if len(row) > 4 else ""
+                        entry = {
+                            "Reference": ref or "NOREF",
+                            "Designation": des or ref,
+                            "PU HT": round(pu, 2) if pu else "",
+                            "TVA %": round(tv, 2) if tv else "",
+                            "Classification vente": cc,
+                            "_source": "📄 Nouveau",
+                            "_entityid": None,
+                        }
+                        # Initialiser les champs extra vides
+                        for _api_f, _disp_f in _api_extra_fields.items():
+                            entry[_disp_f] = ""
+                        ref_key = entry["Reference"].upper()
+                        if ref_key in ev_articles:
+                            ev = ev_articles[ref_key]
+                            seen_art_ids.add(ev["_id"])
+                            entry["_source"] = "📄+☁️ Doublon"
+                            entry["_entityid"] = ev["_id"]
+                            # Completer les champs extra depuis l'API
+                            for _api_f, _disp_f in _api_extra_fields.items():
+                                _v = ev.get(_api_f)
+                                if _v not in (None, ""):
+                                    entry[_disp_f] = _v
+                        consol_art.append(entry)
+
+                    for ref_key, ev in ev_articles.items():
+                        if ev["_id"] not in seen_art_ids:
+                            _e = {
+                                "Reference": ev.get("reference", ""),
+                                "Designation": ev.get("designation", ""),
+                                "PU HT": ev.get("unit_price", ""),
+                                "TVA %": ev.get("vat_rate", ""),
+                                "Classification vente": sale_cl_by_id.get(ev.get("sale_classificationid"), ""),
+                                "_source": "☁️ Evoliz seul",
+                                "_entityid": ev["_id"],
+                            }
+                            for _api_f, _disp_f in _api_extra_fields.items():
+                                _v = ev.get(_api_f)
+                                _e[_disp_f] = _v if _v not in (None,) else ""
+                            consol_art.append(_e)
+
+                    st.session_state["_art_consol"] = consol_art
+                    st.session_state["_art_sale_cl"] = sale_cl
+                    st.session_state["_art_consol_stats"] = {
+                        "fichier": sum(1 for c in consol_art if "Nouveau" in c["_source"]),
+                        "doublons": sum(1 for c in consol_art if "Doublon" in c["_source"]),
+                        "evoliz_seul": sum(1 for c in consol_art if "Evoliz seul" in c["_source"]),
+                        "total_evoliz": len(ev_articles),
+                    }
+                    st.rerun()
+
+                # Affichage consolidation
+                consol_art = st.session_state.get("_art_consol", [])
+                stats_a = st.session_state.get("_art_consol_stats")
+                sale_cl = st.session_state.get("_art_sale_cl", {})
+                if stats_a:
+                    st.divider()
+                    st.subheader("📊 Consolidation")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("📄 Nouveaux", stats_a["fichier"])
+                    c2.metric("📄+☁️ Doublons", stats_a["doublons"])
+                    c3.metric("☁️ Evoliz seul", stats_a["evoliz_seul"])
+                    c4.metric("☁️ Total Evoliz", stats_a["total_evoliz"])
+
+                # --- Extraction PDF : rendue dans le conteneur place AVANT la consolidation ---
+                with _pdf_container:
+                    _pdfs = st.session_state.get("imp_file_articles_pdfs", [])
+                    _n_pdfs = len(_pdfs) if _pdfs else 0
+                    _pdf_already_added = sum(1 for a in consol_art if a.get("_source") == "📸 Facture")
+                    with st.expander(f"📸 Etape 1 — Extraire les lignes depuis {_n_pdfs} facture(s) PDF ({_pdf_already_added} deja ajoutee(s))", expanded=(_n_pdfs > 0 and _pdf_already_added == 0)):
+                        if not _HAS_PDFPLUMBER:
+                            st.warning("Installer `pdfplumber` pour activer cette fonctionnalite : `pip install pdfplumber`")
+                        elif _n_pdfs == 0:
+                            st.info("Aucun PDF importe. Ajoutez des factures PDF dans l'onglet **📁 Import fichiers** (ligne Factures PDF).")
                         else:
-                            r=requests.post(url_art,headers=headers,json=art,timeout=15)
-                            if r.status_code in (200,201): created+=1
-                            elif r.status_code==400 and "already been taken" in r.text: updated+=1
-                            else: errors.append(f"Creation '{art['reference']}': HTTP {r.status_code}")
-                        prog.progress((i+1)/len(articles),text=f"Article {i+1}/{len(articles)}")
-                    prog.empty()
-                    parts=[]
-                    if created: parts.append(f"{created} cree(s)")
-                    if updated: parts.append(f"{updated} mis a jour")
-                    if parts: st.success(f"Articles Evoliz : {', '.join(parts)}")
-                    if errors:
-                        with st.expander(f"{len(errors)} erreur(s)",expanded=True):
-                            for e in errors: st.error(e)
+                            st.caption(f"📦 **{_n_pdfs} facture(s)** prete(s) pour extraction → mapping manuel des colonnes.")
+
+                            c_ex1, c_ex2 = st.columns(2)
+                            _extract_mode = c_ex1.radio("Mode d'extraction", ["Lignes de texte brut", "Tables structurees"], horizontal=False, key="pdf_extract_mode")
+                            _show_raw = c_ex2.checkbox("Afficher le texte brut extrait (debug)", value=False, key="pdf_show_raw")
+
+                            if st.button("🔍 Extraire", key="btn_extract_pdf_art", type="primary"):
+                                # --- Extraction parallele (jusqu'a 100 PDFs) ---
+                                import io as _io_pdf
+                                def _extract_single_pdf(pdf_file, mode, show_raw):
+                                    """Extraction d'un seul PDF. Retourne (rows, raw_pages, err)."""
+                                    _rows = []; _raw_pages = []; _err = None
+                                    try:
+                                        pdf_file.seek(0)
+                                        _bytes = pdf_file.read()
+                                        with pdfplumber.open(_io_pdf.BytesIO(_bytes)) as pdf:
+                                            for _pg_num, page in enumerate(pdf.pages):
+                                                if mode == "Tables structurees":
+                                                    _tables = page.extract_tables() or []
+                                                    for _t_idx, _tbl in enumerate(_tables):
+                                                        if not _tbl: continue
+                                                        _max_w = max(len(r) for r in _tbl) if _tbl else 0
+                                                        for _row in _tbl:
+                                                            _row_p = list(_row) + [None] * (_max_w - len(_row))
+                                                            _clean = [str(c).strip() if c else "" for c in _row_p]
+                                                            if not any(_clean): continue
+                                                            _entry = {f"Col {_k+1}": _clean[_k] for _k in range(_max_w)}
+                                                            _entry["_pdf"] = pdf_file.name
+                                                            _entry["_page"] = _pg_num + 1
+                                                            _entry["_tbl"] = _t_idx + 1
+                                                            _rows.append(_entry)
+                                                else:
+                                                    # Mode "Lignes de texte brut" : on utilise les coordonnees
+                                                    # des mots pour detecter les colonnes reelles (pas de split par espaces).
+                                                    # Les mots proches horizontalement sont groupes dans la meme colonne.
+                                                    _words = page.extract_words(extra_attrs=["fontname", "size"]) or []
+                                                    if not _words:
+                                                        continue
+                                                    # Groupement par ligne (coordonnee y similaire, tolerance 3pt)
+                                                    _lines_by_y = []
+                                                    _words_sorted = sorted(_words, key=lambda w: (w["top"], w["x0"]))
+                                                    for _w in _words_sorted:
+                                                        _placed = False
+                                                        for _grp in _lines_by_y:
+                                                            if abs(_grp[0]["top"] - _w["top"]) <= 3:
+                                                                _grp.append(_w); _placed = True; break
+                                                        if not _placed:
+                                                            _lines_by_y.append([_w])
+                                                    # Pour chaque ligne, clusteriser les mots en colonnes via x-gap
+                                                    for _grp in _lines_by_y:
+                                                        _grp.sort(key=lambda w: w["x0"])
+                                                        # Seuil de gap : derive de la mediane des gaps entre mots
+                                                        _gaps = [_grp[_i]["x0"] - _grp[_i-1]["x1"] for _i in range(1, len(_grp))]
+                                                        if _gaps:
+                                                            _sorted_gaps = sorted(_gaps)
+                                                            _median_gap = _sorted_gaps[len(_sorted_gaps)//2]
+                                                            _gap_threshold = max(5, _median_gap * 2.5)
+                                                        else:
+                                                            _gap_threshold = 5
+                                                        _cols_words = [[_grp[0]]]
+                                                        for _w in _grp[1:]:
+                                                            _gap = _w["x0"] - _cols_words[-1][-1]["x1"]
+                                                            if _gap > _gap_threshold:
+                                                                _cols_words.append([_w])
+                                                            else:
+                                                                _cols_words[-1].append(_w)
+                                                        _cols = [" ".join(_ww["text"] for _ww in _col_w).strip() for _col_w in _cols_words]
+                                                        if not any(_cols): continue
+                                                        _entry = {f"Col {_k+1}": _cols[_k] for _k in range(len(_cols))}
+                                                        _entry["_pdf"] = pdf_file.name
+                                                        _entry["_page"] = _pg_num + 1
+                                                        _entry["_ligne"] = " | ".join(_cols)[:200]
+                                                        _rows.append(_entry)
+                                                if show_raw:
+                                                    _raw_pages.append(page.extract_text() or "")
+                                    except Exception as _exc:
+                                        _err = str(_exc)
+                                    return (pdf_file.name, _rows, _raw_pages, _err)
+
+                                _all_rows = []
+                                _raw_texts = {}
+                                _errs_pdf = []
+                                _total_pdf = len(_pdfs)
+                                _pg_ocr = st.progress(0.0, text=f"Extraction — 0 / {_total_pdf} (8 workers)")
+                                # Jusqu'a 8 workers en parallele (threads : pdfplumber est IO-bound)
+                                with ThreadPoolExecutor(max_workers=min(8, _total_pdf)) as _pool:
+                                    _futures = {_pool.submit(_extract_single_pdf, p, _extract_mode, _show_raw): p for p in _pdfs}
+                                    for _n, _fut in enumerate(as_completed(_futures)):
+                                        _name, _rows, _raw_pages, _err = _fut.result()
+                                        if _err:
+                                            _errs_pdf.append(f"{_name}: {_err}")
+                                        _all_rows.extend(_rows)
+                                        if _show_raw:
+                                            _raw_texts[_name] = _raw_pages
+                                        _pg_ocr.progress((_n + 1) / _total_pdf, text=f"Extraction — {_n+1} / {_total_pdf}")
+                                _pg_ocr.empty()
+                                if _errs_pdf:
+                                    with st.expander(f"⚠️ {len(_errs_pdf)} PDF en erreur", expanded=False):
+                                        for e in _errs_pdf: st.text(e)
+                                st.session_state["_art_pdf_rows"] = _all_rows
+                                st.session_state["_art_pdf_raw"] = _raw_texts if _show_raw else {}
+                                st.rerun()
+
+                            # Affichage texte brut si demande
+                            _raw = st.session_state.get("_art_pdf_raw", {})
+                            if _raw:
+                                for _fn, _pgs in _raw.items():
+                                    with st.expander(f"📄 Texte brut : {_fn}", expanded=False):
+                                        for _i, _t in enumerate(_pgs):
+                                            st.text_area(f"Page {_i+1}", value=_t, height=200, key=f"_raw_txt_{_fn}_{_i}")
+
+                            _all_rows = st.session_state.get("_art_pdf_rows", [])
+                            if _all_rows:
+                                # Normaliser les cles pour creer un DataFrame homogene
+                                _all_keys = []
+                                for _r in _all_rows:
+                                    for _k in _r.keys():
+                                        if _k not in _all_keys:
+                                            _all_keys.append(_k)
+                                _df_rows = pd.DataFrame(_all_rows, columns=_all_keys)
+                                _data_cols = [c for c in _all_keys if not c.startswith("_")]
+
+                                st.success(f"✅ {len(_df_rows)} ligne(s) brute(s) extraite(s) sur {len({r['_pdf'] for r in _all_rows})} PDF")
+
+                                # Filtre : ignorer les lignes vides de la plupart des colonnes (en-tetes, separations)
+                                _only_data = st.checkbox("Filtrer les lignes probablement hors-table (ne garder que celles avec 2+ colonnes non vides)", value=True, key="pdf_only_data")
+                                if _only_data:
+                                    _mask = _df_rows[_data_cols].apply(lambda r: (r.astype(str).str.strip() != "").sum() >= 2, axis=1)
+                                    _df_rows_show = _df_rows[_mask].reset_index(drop=True)
+                                else:
+                                    _df_rows_show = _df_rows.reset_index(drop=True)
+
+                                # Afficher le dump brut dans un expander (debug)
+                                with st.expander(f"🔎 Voir les {len(_df_rows_show)} ligne(s) brutes extraites", expanded=False):
+                                    # Masquer les colonnes techniques volumineuses (_pdf, _page, _tbl, _ligne)
+                                    _cols_hide = [c for c in _df_rows_show.columns if c.startswith("_")]
+                                    st.dataframe(_df_rows_show.drop(columns=_cols_hide).head(100), use_container_width=True, hide_index=True)
+
+                                # Helper de conversion numerique (defini AVANT l'auto-detection)
+                                def _to_num(v):
+                                    if v is None or str(v).strip() == "": return None
+                                    s = str(v).replace(",", ".").replace("€", "").replace("\u00a0", "").replace(" ", "").strip()
+                                    try: return round(float(s), 4)
+                                    except ValueError: return None
+
+                                # --- 🤖 Detection MULTI-BLOCS par headers Qte ---
+                                # Un document peut contenir plusieurs blocs d'articles (plusieurs pages,
+                                # plusieurs tableaux imbriques). Chaque bloc a son propre header Qte.
+                                # Pour chaque bloc, les cellules du header row servent de noms de champs.
+                                _qte_pat = re.compile(r"(?i)(^|\s|\(|\[|\/)(qte|qté|quant(?:ité|ite)?s?|qty|q\.)\b")
+                                _total_re = re.compile(r"(?i)\b(total|sous[-\s]?total|net\s*a\s*payer|montant\s*(ht|ttc)|a\s*payer|tva\s*\d)\b")
+
+                                # 1) Trouver TOUS les headers Qte (col, row) avec >= 1 valeur numerique en dessous
+                                _headers_found = []  # liste de (row_idx, qte_col, header_cells_dict)
+                                for _ri, _row in _df_rows_show.iterrows():
+                                    for _c in _data_cols:
+                                        _cell = str(_row.get(_c, "")).strip()
+                                        if not _cell: continue
+                                        if _qte_pat.search(_cell) and len(_cell) < 40:
+                                            _below = _df_rows_show.iloc[_ri+1:_ri+20][_c].astype(str).str.strip().tolist()
+                                            _num_count = sum(1 for v in _below if _to_num(v) is not None and _to_num(v) > 0)
+                                            if _num_count >= 1:
+                                                # Capturer les headers de la ligne (pour cette vue-bloc)
+                                                _header_cells = {_hc: str(_row.get(_hc, "")).strip() for _hc in _data_cols}
+                                                _headers_found.append((_ri, _c, _header_cells))
+                                                break  # un seul Qte-header par ligne
+
+                                # 2) Pour chaque header trouve, extraire les lignes d'articles jusqu'a rupture
+                                _all_articles = []  # liste de dicts {header_label -> value, "_block": idx, "_pdf": name}
+                                _blocks_info = []   # pour restitution
+                                for _blk_idx, (_hdr_ri, _qte_c, _hdr_cells) in enumerate(_headers_found):
+                                    _start = _hdr_ri + 1
+                                    # Ne pas repasser sur une ligne deja dans un autre bloc
+                                    _next_hdr_ri = _headers_found[_blk_idx + 1][0] if _blk_idx + 1 < len(_headers_found) else len(_df_rows_show)
+                                    _end = _next_hdr_ri
+                                    _block_articles = []
+                                    for _ri in range(_start, _end):
+                                        _row = _df_rows_show.iloc[_ri]
+                                        _qte_val = _to_num(_row.get(_qte_c, ""))
+                                        if _qte_val is None or _qte_val <= 0:
+                                            _row_txt = " ".join(str(_row.get(_c, "")).strip() for _c in _data_cols)
+                                            # Ligne vide = tolerer
+                                            if not _row_txt.strip(): continue
+                                            # Total = arreter ce bloc
+                                            if _total_re.search(_row_txt): break
+                                            # Header Qte repete (page break) = continuer
+                                            if _qte_pat.search(str(_row.get(_qte_c, "")).strip()): continue
+                                            # Autre ligne = arreter ce bloc
+                                            break
+                                        # Ligne d'article : extraire les valeurs par colonne avec leur header
+                                        _art = {"_block": _blk_idx + 1, "_pdf": _row.get("_pdf", ""), "_page": _row.get("_page", "")}
+                                        for _c in _data_cols:
+                                            _label = _hdr_cells.get(_c, "").strip() or _c  # fallback : nom de colonne brut
+                                            _val = str(_row.get(_c, "")).strip()
+                                            # Exclure la colonne Qte du tableau final
+                                            if _c == _qte_c:
+                                                _art["_qte"] = _qte_val
+                                                continue
+                                            if _label and _val:
+                                                _art[_label] = _val
+                                        _block_articles.append(_art)
+                                    _all_articles.extend(_block_articles)
+                                    _blocks_info.append({
+                                        "Bloc": _blk_idx + 1,
+                                        "Header ligne": _hdr_ri + 1,
+                                        "Col Qte": _qte_c,
+                                        "Libelle Qte": _hdr_cells.get(_qte_c, ""),
+                                        "Articles extraits": len(_block_articles),
+                                    })
+
+                                # Etat compatibilite avec le code de mapping/insertion existant
+                                _detected_qte_col = None
+                                _detected_header_row = None
+                                _detect_source = ""
+                                if _headers_found:
+                                    # Pour retro-compat avec le mapping manuel qui preselectionne
+                                    _detected_qte_col = _headers_found[0][1]
+                                    _detected_header_row = _headers_found[0][0]
+
+                                if _blocks_info:
+                                    st.info(f"🤖 **{len(_blocks_info)} bloc(s) d'articles** detecte(s) — {sum(b['Articles extraits'] for b in _blocks_info)} ligne(s) au total.")
+                                    with st.expander("Details des blocs detectes", expanded=False):
+                                        st.dataframe(pd.DataFrame(_blocks_info), use_container_width=True, hide_index=True)
+
+                                # Tableau de restitution : reprendre tous les headers (sauf Qte) trouves dans les blocs
+                                if _all_articles:
+                                    # Union des cles (hors techniques)
+                                    _all_headers = []
+                                    for _a in _all_articles:
+                                        for _k in _a.keys():
+                                            if _k.startswith("_"): continue
+                                            if _k not in _all_headers:
+                                                _all_headers.append(_k)
+                                    _df_articles = pd.DataFrame([
+                                        {**{_h: _a.get(_h, "") for _h in _all_headers},
+                                         "Bloc": _a.get("_block"),
+                                         "Qte": _a.get("_qte", ""),
+                                         "PDF": _a.get("_pdf", ""),
+                                        }
+                                        for _a in _all_articles
+                                    ])
+                                    st.markdown(f"**📦 {len(_df_articles)} ligne(s) d'article extraite(s)** (colonnes issues des headers de chaque bloc)")
+                                    st.dataframe(_df_articles, use_container_width=True, hide_index=True)
+                                    # Sauvegarder pour usage ulterieur (mapping + injection)
+                                    st.session_state["_art_pdf_extracted_rows"] = _all_articles
+                                    # Pour compat : remplacer _df_rows_show par les lignes d'article detectees
+                                    _df_rows_show = _df_rows_show.iloc[[_h[0] for _h in _headers_found] + [_ri for _a in _all_articles for _ri in []]].reset_index(drop=True) if False else _df_rows_show
+
+                                # --- Mapping : choisir quels headers extraits deviennent quoi ---
+                                # Utilise les noms de champs reels (headers PDF) et non plus Col 1, Col 2...
+                                _extracted = st.session_state.get("_art_pdf_extracted_rows", []) or _all_articles
+                                if _extracted:
+                                    _field_options = ["— Non mappee —"]
+                                    _union_hdrs = []
+                                    for _a in _extracted:
+                                        for _k in _a.keys():
+                                            if _k.startswith("_"): continue
+                                            if _k not in _union_hdrs:
+                                                _union_hdrs.append(_k)
+                                    _field_options += _union_hdrs
+
+                                    # Heuristique d'auto-selection
+                                    def _auto_pick(keywords):
+                                        for _h in _union_hdrs:
+                                            _hn = _h.lower()
+                                            for kw in keywords:
+                                                if kw in _hn:
+                                                    return _h
+                                        return "— Non mappee —"
+                                    _auto_ref = _auto_pick(["ref", "code", "article"])
+                                    _auto_des = _auto_pick(["design", "libell", "produit", "descr"])
+                                    _auto_pu = _auto_pick(["pu", "prix", "unitaire", "unit"])
+                                    _auto_tva = _auto_pick(["tva", "vat", "taxe"])
+
+                                    st.markdown("**🗺️ Mapping des headers PDF → champs article**")
+                                    m1, m2, m3, m4, m5 = st.columns(5)
+                                    _map_ref = m1.selectbox("Reference", _field_options,
+                                                             index=_field_options.index(_auto_ref), key="pdf_map_ref")
+                                    _map_des = m2.selectbox("Designation", _field_options,
+                                                             index=_field_options.index(_auto_des), key="pdf_map_des")
+                                    _map_pu = m3.selectbox("PU HT", _field_options,
+                                                            index=_field_options.index(_auto_pu), key="pdf_map_pu")
+                                    _map_tva = m4.selectbox("TVA %", _field_options,
+                                                             index=_field_options.index(_auto_tva), key="pdf_map_tva")
+                                    _map_cl = m5.selectbox("Classif. vente", _field_options, key="pdf_map_cl")
+
+                                    c_add1, c_add2 = st.columns(2)
+                                    if c_add1.button(f"➕ Ajouter les {len(_extracted)} ligne(s) a la consolidation", type="primary", key="btn_add_pdf_to_consol"):
+                                        _existing_refs = {str(a.get("Reference", "")).upper(): i for i, a in enumerate(consol_art)}
+                                        _existing_des = {str(a.get("Designation", "")).strip().upper(): i for i, a in enumerate(consol_art) if a.get("Designation")}
+                                        # Dedup local sur les lignes extraites (par Ref puis Designation)
+                                        _seen_refs_local = set()
+                                        _seen_des_local = set()
+                                        _added = _merged = _skip_line = _skip_dup = 0
+                                        for _a in _extracted:
+                                            _ref = str(_a.get(_map_ref, "")).strip() if _map_ref != "— Non mappee —" else ""
+                                            _des = str(_a.get(_map_des, "")).strip() if _map_des != "— Non mappee —" else ""
+                                            _pu_n = _to_num(_a.get(_map_pu, "")) if _map_pu != "— Non mappee —" else None
+                                            _tva_n = _to_num(_a.get(_map_tva, "")) if _map_tva != "— Non mappee —" else None
+                                            _cl_v = str(_a.get(_map_cl, "")).strip().upper() if _map_cl != "— Non mappee —" else ""
+
+                                            if not _ref and not _des:
+                                                _skip_line += 1; continue
+                                            if re.search(r"(?i)\b(total|sous-total|net\s*a\s*payer|tva|montant\s*ht|ttc)\b", _des):
+                                                _skip_line += 1; continue
+
+                                            _rk = (_ref or "NOREF").upper()
+                                            _dk = _des.strip().upper()
+
+                                            # Dedup INTRA-extraction (deux PDFs / lignes avec meme Ref ou meme Designation)
+                                            if _rk != "NOREF" and _rk in _seen_refs_local:
+                                                _skip_dup += 1; continue
+                                            if _dk and _dk in _seen_des_local:
+                                                _skip_dup += 1; continue
+
+                                            _entry = {
+                                                "Reference": _ref or "NOREF",
+                                                "Designation": _des or _ref,
+                                                "PU HT": _pu_n if _pu_n is not None else "",
+                                                "TVA %": _tva_n if _tva_n is not None else "",
+                                                "Classification vente": _cl_v,
+                                                "_source": "📸 Facture",
+                                                "_entityid": None,
+                                            }
+
+                                            # Fusion avec une entree existante dans consol_art (match sur Ref OU Designation)
+                                            _match_i = None
+                                            if _rk != "NOREF" and _rk in _existing_refs:
+                                                _match_i = _existing_refs[_rk]
+                                            elif _dk and _dk in _existing_des:
+                                                _match_i = _existing_des[_dk]
+
+                                            if _match_i is not None:
+                                                for _f in ["Designation", "PU HT", "TVA %", "Classification vente"]:
+                                                    if not consol_art[_match_i].get(_f) and _entry.get(_f):
+                                                        consol_art[_match_i][_f] = _entry[_f]
+                                                _merged += 1
+                                            else:
+                                                consol_art.append(_entry)
+                                                _added += 1
+
+                                            if _rk != "NOREF": _seen_refs_local.add(_rk)
+                                            if _dk: _seen_des_local.add(_dk)
+                                        st.session_state["_art_consol"] = consol_art
+                                        st.session_state["_art_pdf_rows"] = []
+                                        st.session_state["_art_pdf_extracted_rows"] = []
+                                        _msg = f"✅ {_added} ajoute(s), {_merged} fusionne(s), {_skip_line} ignore(s), {_skip_dup} doublon(s) deduplique(s)"
+                                        st.success(_msg)
+                                        st.rerun()
+
+                                    if c_add2.button("🗑️ Vider l'extraction", key="btn_clear_pdf_extraction"):
+                                        st.session_state["_art_pdf_rows"] = []
+                                        st.session_state["_art_pdf_raw"] = {}
+                                        st.session_state["_art_pdf_extracted_rows"] = []
+                                        st.rerun()
+
+                if consol_art:
+                    # --- Creation de classifications de vente (queue + batch) ---
+                    if "_art_pending_classifs" not in st.session_state:
+                        st.session_state._art_pending_classifs = []  # liste de dicts {label, accountid, account_label}
+                    _pending_cl = st.session_state._art_pending_classifs
+
+                    with st.expander(f"➕ Creer de nouvelles classifications de vente ({len(_pending_cl)} en attente)", expanded=False):
+                        st.caption("Les classifs sont d'abord **mises en attente**. Elles seront creees via API **au moment de l'injection des articles**, et les IDs obtenus seront utilises dans les payloads article.")
+
+                        # Chargement des comptes si pas encore disponibles
+                        _ev_accounts = st.session_state.get("ev_acc_105", {})
+                        if not _ev_accounts:
+                            if st.button("📖 Charger les comptes comptables depuis Evoliz", key="btn_load_acc_art"):
+                                with st.spinner("Lecture des comptes Evoliz..."):
+                                    st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
+                                st.rerun()
+                            st.info("Aucun compte comptable en session. Cliquez sur le bouton ci-dessus pour les charger.")
+                        else:
+                            _only_7xx = st.checkbox("Afficher uniquement les comptes 7xx (ventes)", value=True, key="art_only_7xx")
+                            _accs = list(_ev_accounts.values())
+                            _seen_acc_ids = set()
+                            _accs_unique = []
+                            for _a in _accs:
+                                if _a['id'] in _seen_acc_ids: continue
+                                _seen_acc_ids.add(_a['id'])
+                                if _only_7xx and not str(_a.get('code', '')).startswith('7'): continue
+                                _accs_unique.append(_a)
+                            _accs_unique.sort(key=lambda x: str(x.get('code', '')))
+                            _acc_options = [f"{a['code']} - {a['label']}" for a in _accs_unique]
+                            _acc_map = {f"{a['code']} - {a['label']}": a['id'] for a in _accs_unique}
+
+                            if not _acc_options:
+                                st.warning("Aucun compte disponible avec le filtre courant.")
+                            else:
+                                st.caption("**Mode 1 — Ajout rapide (plusieurs classifs pour un meme compte)**")
+                                _acc_sel = st.selectbox("Compte comptable a lier", _acc_options, key="new_cl_acc")
+                                _labels_multi = st.text_area(
+                                    "Libelles des classifications (un par ligne)",
+                                    placeholder="BOULANGERIE\nPATISSERIE\nBOISSONS",
+                                    key="new_cl_labels_multi",
+                                    height=100,
+                                )
+                                if st.button("📥 Ajouter a la liste a creer", key="btn_add_cl_multi"):
+                                    _lines = [ln.strip() for ln in _labels_multi.split("\n") if ln.strip()]
+                                    if not _lines:
+                                        st.warning("Saisissez au moins un libelle.")
+                                    else:
+                                        _acc_id = _acc_map[_acc_sel]
+                                        _added = 0
+                                        _existing_labels = {p["label"].upper() for p in _pending_cl}
+                                        for _lbl in _lines:
+                                            if _lbl.upper() in _existing_labels: continue
+                                            if _lbl.upper() in sale_cl: continue  # deja cree dans Evoliz
+                                            _pending_cl.append({"label": _lbl, "accountid": _acc_id, "account_label": _acc_sel})
+                                            _added += 1
+                                        st.session_state._art_pending_classifs = _pending_cl
+                                        st.success(f"✅ {_added} classif(s) ajoute(s) a la liste.")
+                                        st.rerun()
+
+                                st.divider()
+                                st.caption("**Mode 2 — Ajout detaille (compte distinct par classif)**")
+                                _nrows = st.number_input("Nombre de classifs a ajouter", min_value=1, max_value=50, value=3, step=1, key="new_cl_nrows")
+                                _to_add_list = []
+                                for _i in range(int(_nrows)):
+                                    c1, c2 = st.columns([2, 3])
+                                    _lbl_i = c1.text_input(f"Libelle {_i+1}", key=f"new_cl_lbl_{_i}")
+                                    _acc_i = c2.selectbox(f"Compte {_i+1}", [""] + _acc_options, key=f"new_cl_acc_{_i}")
+                                    if _lbl_i and _acc_i:
+                                        _to_add_list.append((_lbl_i, _acc_map[_acc_i], _acc_i))
+                                if _to_add_list:
+                                    if st.button(f"📥 Ajouter les {len(_to_add_list)} classif(s) a la liste", key="btn_add_cl_detail"):
+                                        _added = 0
+                                        _existing_labels = {p["label"].upper() for p in _pending_cl}
+                                        for _lbl, _acc_id, _acc_lbl in _to_add_list:
+                                            if _lbl.upper() in _existing_labels: continue
+                                            if _lbl.upper() in sale_cl: continue
+                                            _pending_cl.append({"label": _lbl, "accountid": _acc_id, "account_label": _acc_lbl})
+                                            _added += 1
+                                        st.session_state._art_pending_classifs = _pending_cl
+                                        st.success(f"✅ {_added} classif(s) ajoute(s) a la liste.")
+                                        st.rerun()
+
+                        # --- Liste des classifs en attente avec suppression ---
+                        if _pending_cl:
+                            st.divider()
+                            st.markdown(f"**📋 {len(_pending_cl)} classification(s) en attente de creation**")
+                            _df_pending = pd.DataFrame([
+                                {"Libelle": p["label"], "Compte comptable": p["account_label"]}
+                                for p in _pending_cl
+                            ])
+                            st.dataframe(_df_pending, use_container_width=True, hide_index=True)
+                            c_p1, c_p2 = st.columns(2)
+                            if c_p1.button("🗑️ Vider la liste", key="btn_clear_pending_cl"):
+                                st.session_state._art_pending_classifs = []
+                                st.rerun()
+                            if c_p2.button("🚀 Creer maintenant (sans attendre l'injection)", key="btn_create_now_pending_cl"):
+                                _ok = _ko = 0; _errs = []
+                                _pg = st.progress(0.0, text=f"Creation — 0 / {len(_pending_cl)}")
+                                _remaining = []
+                                for _i, _p in enumerate(_pending_cl):
+                                    ok, resp = inject_flux("VENTE", _p["label"][:50], _p["label"], headers,
+                                                            acc_id=_p["accountid"], company_id=cid)
+                                    if ok:
+                                        _ok += 1
+                                        _new_code = _p["label"][:50].upper()
+                                        _new_id = resp.get("classificationid") or resp.get("id") if isinstance(resp, dict) else None
+                                        if _new_id:
+                                            sale_cl[_new_code] = _new_id
+                                    else:
+                                        _ko += 1; _errs.append(f"{_p['label']}: {resp}")
+                                        _remaining.append(_p)
+                                    _pg.progress((_i + 1) / len(_pending_cl), text=f"Creation — {_i+1} / {len(_pending_cl)}")
+                                st.session_state["_art_sale_cl"] = sale_cl
+                                st.session_state._art_pending_classifs = _remaining
+                                if _ok: st.success(f"✅ {_ok} classification(s) creee(s)")
+                                if _ko:
+                                    st.error(f"❌ {_ko} erreur(s)")
+                                    with st.expander("Detail erreurs"):
+                                        for e in _errs: st.text(e)
+                                st.rerun()
+
+                    # --- Mapping rapide des classifications ---
+                    # Options = classifs existantes + classifs en attente (prefixees ⏳)
+                    _pending_labels = [f"⏳ {p['label'].upper()}" for p in st.session_state.get("_art_pending_classifs", [])]
+                    _cl_options = [""] + sorted(sale_cl.keys()) + _pending_labels
+
+                    # Mapping en masse : classifs inconnues -> reaffecter
+                    _unknown_cl = sorted({str(a.get("Classification vente", "")).strip().upper()
+                                           for a in consol_art
+                                           if a.get("Classification vente") and str(a.get("Classification vente")).strip().upper() not in sale_cl})
+                    if _unknown_cl:
+                        with st.expander(f"🔀 Remapper les {len(_unknown_cl)} classification(s) inconnue(s) en masse", expanded=True):
+                            st.caption("Choisissez la classification Evoliz correspondante. Tous les articles concernes seront mis a jour.")
+                            _bulk_map = {}
+                            for _uc in _unknown_cl:
+                                _nb = sum(1 for a in consol_art if str(a.get("Classification vente", "")).strip().upper() == _uc)
+                                _bulk_map[_uc] = st.selectbox(
+                                    f"**{_uc}** ({_nb} article(s))",
+                                    _cl_options,
+                                    key=f"bulk_cl_{_uc}",
+                                    format_func=lambda x: "— Laisser vide —" if not x else x,
+                                )
+                            if st.button("✅ Appliquer le remapping", key="btn_apply_bulk_cl"):
+                                for i, a in enumerate(consol_art):
+                                    _cur = str(a.get("Classification vente", "")).strip().upper()
+                                    if _cur in _bulk_map and _bulk_map[_cur]:
+                                        consol_art[i]["Classification vente"] = _bulk_map[_cur]
+                                st.session_state["_art_consol"] = consol_art
+                                st.rerun()
+
+                    # --- Tableau consolide : tous champs editables + masquage colonnes ---
+                    df_art_preview = pd.DataFrame([{k: v for k, v in c.items() if not k.startswith("_")} for c in consol_art])
+                    _sources_a = [c["_source"] for c in consol_art]
+                    df_art_preview.insert(0, "Source", _sources_a)
+
+                    _all_art_cols = [c for c in df_art_preview.columns if c != "Source"]
+                    _hidden_default = st.session_state.get("_art_hidden_cols", [])
+                    _hidden_cols = st.multiselect(
+                        "🙈 Colonnes a masquer (non-envoyees a Evoliz lors de l'injection)",
+                        options=_all_art_cols,
+                        default=[c for c in _hidden_default if c in _all_art_cols],
+                        key="_art_hidden_cols",
+                        help="Cocher les attributs a ignorer. Les colonnes masquees ne seront pas envoyees a l'API.",
+                    )
+                    _visible_cols = ["Source"] + [c for c in _all_art_cols if c not in _hidden_cols]
+                    df_art_display = df_art_preview[_visible_cols]
+
+                    _edited_art = st.data_editor(
+                        df_art_display,
+                        use_container_width=True, hide_index=True,
+                        disabled=["Source"],
+                        column_config={
+                            "Classification vente": st.column_config.SelectboxColumn(
+                                "Classification vente",
+                                help="Selectionnez une classification de vente existante dans Evoliz. Editable et saisissable.",
+                                options=_cl_options,
+                                required=False,
+                            ),
+                            "Prix d'achat": st.column_config.NumberColumn("Prix d'achat", step=0.01, format="%.2f"),
+                            "Prix mini": st.column_config.NumberColumn("Prix mini", step=0.01, format="%.2f"),
+                            "Poids": st.column_config.NumberColumn("Poids (kg)", step=0.01, format="%.2f"),
+                            "Hauteur": st.column_config.NumberColumn("Hauteur", step=0.1, format="%.1f"),
+                            "Largeur": st.column_config.NumberColumn("Largeur", step=0.1, format="%.1f"),
+                            "Profondeur": st.column_config.NumberColumn("Profondeur", step=0.1, format="%.1f"),
+                            "Gestion stock": st.column_config.CheckboxColumn("Gestion stock"),
+                            "Marque": st.column_config.TextColumn("Marque"),
+                            "Description": st.column_config.TextColumn("Description"),
+                            "Note": st.column_config.TextColumn("Note"),
+                            "EAN / Code-barres": st.column_config.TextColumn("EAN"),
+                            "Unite": st.column_config.TextColumn("Unite", help="kg, l, piece, etc."),
+                            "Ref. fournisseur": st.column_config.TextColumn("Ref. fournisseur"),
+                            "Reference": st.column_config.TextColumn("Reference", help="Cle unique de l'article. Editable."),
+                            "Designation": st.column_config.TextColumn("Designation", help="Editable. Copie-colle OK."),
+                            "PU HT": st.column_config.NumberColumn("PU HT", help="Prix unitaire HT. Editable.", step=0.01, format="%.2f"),
+                            "TVA %": st.column_config.NumberColumn("TVA %", help="Taux TVA. Editable.", step=0.1, format="%.2f"),
+                        },
+                        key="art_editor",
+                    )
+                    # Persister tous les changements de cellules editees (sur les colonnes visibles)
+                    _art_changed = False
+                    for _i, _row in _edited_art.iterrows():
+                        for _col in _visible_cols:
+                            if _col == "Source": continue
+                            _new_v = _row.get(_col)
+                            _old_v = consol_art[_i].get(_col)
+                            # Normalisation selon type
+                            _numeric_cols = ("PU HT", "TVA %", "Prix d'achat", "Prix mini", "Poids", "Hauteur", "Largeur", "Profondeur")
+                            if _col in _numeric_cols:
+                                try: _new_n = float(_new_v) if _new_v not in (None, "") and not (isinstance(_new_v, float) and pd.isna(_new_v)) else ""
+                                except (TypeError, ValueError): _new_n = ""
+                                try: _old_n = float(_old_v) if _old_v not in (None, "") else ""
+                                except (TypeError, ValueError): _old_n = ""
+                                if _new_n != _old_n:
+                                    consol_art[_i][_col] = _new_n
+                                    _art_changed = True
+                            elif _col == "Gestion stock":
+                                _new_b = bool(_new_v) if _new_v is not None else False
+                                _old_b = bool(_old_v) if _old_v else False
+                                if _new_b != _old_b:
+                                    consol_art[_i][_col] = _new_b
+                                    _art_changed = True
+                            else:
+                                _new_s = str(_new_v).strip() if _new_v is not None and not (isinstance(_new_v, float) and pd.isna(_new_v)) else ""
+                                _old_s = str(_old_v).strip() if _old_v is not None and not (isinstance(_old_v, float) and pd.isna(_old_v)) else ""
+                                if _col == "Classification vente":
+                                    _new_s = _new_s.upper()
+                                    _old_s = _old_s.upper()
+                                if _new_s != _old_s:
+                                    consol_art[_i][_col] = _new_s
+                                    _art_changed = True
+                    if _art_changed:
+                        st.session_state["_art_consol"] = consol_art
+
+                    # Verification classif manquantes (apres mapping)
+                    _art_missing_cl = []
+                    for i, a in enumerate(consol_art):
+                        cc = str(a.get("Classification vente", "")).strip().upper()
+                        if cc and cc not in sale_cl:
+                            _art_missing_cl.append({"Reference": a.get("Reference"), "Classification": cc})
+                    if _art_missing_cl:
+                        st.warning(f"⚠️ {len(_art_missing_cl)} article(s) avec classification inconnue (ignoree a l'injection). Utilisez le remappage ci-dessus ou le selecteur dans la colonne.")
+
+                    # Injection
+                    st.divider()
+                    st.subheader("🚀 Injection Articles dans Evoliz")
+                    _pending_now = st.session_state.get("_art_pending_classifs", [])
+                    _lbl_inject = "🚀 Injecter les articles"
+                    if _pending_now:
+                        _lbl_inject = f"🚀 Creer {len(_pending_now)} classif(s) + Injecter les articles"
+                    inject_art_btn = st.button(_lbl_inject, type="primary", use_container_width=True, key="btn_inject_art")
+                    if inject_art_btn:
+                        # --- Etape 1 : Creer les classifications en attente ---
+                        _pending_now = st.session_state.get("_art_pending_classifs", [])
+                        if _pending_now:
+                            st.markdown("### 🏷️ Etape 1 : Creation des classifications en attente")
+                            _ok_cl = _ko_cl = 0; _errs_cl = []
+                            _remaining_cl = []
+                            _pg_cl = st.progress(0.0, text=f"Creation classifs — 0 / {len(_pending_now)}")
+                            for _i, _p in enumerate(_pending_now):
+                                ok, resp = inject_flux("VENTE", _p["label"][:50], _p["label"], headers,
+                                                        acc_id=_p["accountid"], company_id=cid)
+                                if ok:
+                                    _ok_cl += 1
+                                    _new_code = _p["label"][:50].upper()
+                                    _new_id = resp.get("classificationid") or resp.get("id") if isinstance(resp, dict) else None
+                                    if _new_id:
+                                        sale_cl[_new_code] = _new_id
+                                else:
+                                    _ko_cl += 1; _errs_cl.append(f"{_p['label']}: {resp}")
+                                    _remaining_cl.append(_p)
+                                _pg_cl.progress((_i + 1) / len(_pending_now), text=f"Creation classifs — {_i+1} / {len(_pending_now)}")
+                            st.session_state["_art_sale_cl"] = sale_cl
+                            st.session_state._art_pending_classifs = _remaining_cl
+                            if _ok_cl: st.success(f"✅ {_ok_cl} classification(s) creee(s)")
+                            if _ko_cl:
+                                st.error(f"❌ {_ko_cl} erreur(s) de creation classif (les articles concernes seront injectes sans classif)")
+                                with st.expander("Detail erreurs"):
+                                    for e in _errs_cl: st.text(e)
+                            st.markdown("### 📦 Etape 2 : Injection des articles")
+                        url_art = f"https://www.evoliz.io/api/v1/companies/{cid}/articles"
+                        created_a = updated_a = skipped_a = 0; errors_a = []; inject_log_a = []
+                        # On n'envoie que les articles du fichier (Nouveaux + Doublons)
+                        _to_inject = [a for a in consol_art if "Evoliz seul" not in a["_source"]]
+                        # Colonnes masquees -> non envoyees
+                        _hidden_now = set(st.session_state.get("_art_hidden_cols", []))
+                        prog = st.progress(0.0, text=f"Injection articles — 0 / {len(_to_inject)}")
+                        for i, a in enumerate(_to_inject):
+                            payload = {"reference": a["Reference"], "designation": a["Designation"]}
+                            if "PU HT" not in _hidden_now and a.get("PU HT") not in (None, ""):
+                                try: payload["unit_price"] = round(float(a["PU HT"]), 2)
+                                except (TypeError, ValueError): pass
+                            if "TVA %" not in _hidden_now and a.get("TVA %") not in (None, ""):
+                                try: payload["vat_rate"] = round(float(a["TVA %"]), 2)
+                                except (TypeError, ValueError): pass
+                            cc = str(a.get("Classification vente", "")).strip().upper()
+                            # Nettoyer le prefixe ⏳ ajoute pour les classifs en attente
+                            if cc.startswith("⏳"):
+                                cc = cc.replace("⏳", "").strip()
+                            if "Classification vente" not in _hidden_now and cc and cc in sale_cl:
+                                payload["sale_classificationid"] = sale_cl[cc]
+                            # Champs extra API (envoyes si non masques et non vides)
+                            _extra_payload_map = {
+                                "Marque": "brand", "Description": "description", "Note": "note",
+                                "EAN / Code-barres": "ean", "Unite": "unit",
+                                "Prix d'achat": "purchase_price", "Prix mini": "min_sale_price",
+                                "Ref. fournisseur": "supplier_reference", "Poids": "weight",
+                                "Hauteur": "height", "Largeur": "width", "Profondeur": "depth",
+                                "Gestion stock": "stock_management",
+                            }
+                            for _disp_f, _api_f in _extra_payload_map.items():
+                                if _disp_f in _hidden_now: continue
+                                _v = a.get(_disp_f, "")
+                                if _v in (None, ""): continue
+                                # Champs numeriques
+                                if _api_f in ("purchase_price", "min_sale_price", "weight", "height", "width", "depth"):
+                                    try: payload[_api_f] = round(float(_v), 2)
+                                    except (TypeError, ValueError): pass
+                                elif _api_f == "stock_management":
+                                    # Accepte booleens ou strings
+                                    _vs = str(_v).strip().lower()
+                                    payload[_api_f] = _vs in ("true", "1", "oui", "yes", "vrai")
+                                else:
+                                    payload[_api_f] = str(_v).strip()
+                            entity_id = a.get("_entityid")
+                            try:
+                                if entity_id:
+                                    r = requests.patch(f"{url_art}/{entity_id}", headers=headers, json=payload, timeout=15)
+                                    if r.status_code in (200, 204):
+                                        updated_a += 1; inject_log_a.append({"Reference": a["Reference"], "Action": "🔄 MAJ", "Statut": "✅ OK", "Detail": ""})
+                                    else:
+                                        errors_a.append(f"MAJ '{a['Reference']}': HTTP {r.status_code}")
+                                        inject_log_a.append({"Reference": a["Reference"], "Action": "🔄 MAJ", "Statut": f"❌ {r.status_code}", "Detail": r.text[:80]})
+                                else:
+                                    r = requests.post(url_art, headers=headers, json=payload, timeout=15)
+                                    if r.status_code in (200, 201):
+                                        created_a += 1; inject_log_a.append({"Reference": a["Reference"], "Action": "➕ Creation", "Statut": "✅ OK", "Detail": ""})
+                                    elif r.status_code == 400 and "already been taken" in r.text:
+                                        updated_a += 1; inject_log_a.append({"Reference": a["Reference"], "Action": "🔄 Existant", "Statut": "✅ OK", "Detail": ""})
+                                    else:
+                                        errors_a.append(f"Creation '{a['Reference']}': HTTP {r.status_code}")
+                                        inject_log_a.append({"Reference": a["Reference"], "Action": "➕ Creation", "Statut": f"❌ {r.status_code}", "Detail": r.text[:80]})
+                            except Exception as e:
+                                errors_a.append(f"'{a['Reference']}': {e}")
+                                inject_log_a.append({"Reference": a["Reference"], "Action": "?", "Statut": "❌ Exception", "Detail": str(e)[:80]})
+                            prog.progress((i + 1) / max(len(_to_inject), 1), text=f"Injection articles — {i+1} / {len(_to_inject)} — {a['Reference'][:30]}")
+                        prog.empty()
+                        st.divider(); st.subheader("📊 Synthese")
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("➕ Crees", created_a); c2.metric("🔄 MAJ", updated_a)
+                        c3.metric("⏭️ Ignores", skipped_a); c4.metric("❌ Erreurs", len(errors_a))
+                        if created_a + updated_a > 0:
+                            st.success(f"Injection : {created_a} cree(s), {updated_a} mis a jour")
+                        elif errors_a:
+                            st.error(f"{len(errors_a)} erreur(s)")
+                        if inject_log_a:
+                            df_il_a = pd.DataFrame(inject_log_a)
+                            def _ci_a(row):
+                                s = str(row.get("Statut", "")); a = str(row.get("Action", ""))
+                                if "OK" in s and "Creation" in a: return ["background-color:#d4edda"] * len(row)
+                                if "OK" in s: return ["background-color:#e8f4fd"] * len(row)
+                                if "❌" in s: return ["background-color:#f8d7da"] * len(row)
+                                return [""] * len(row)
+                            st.dataframe(df_il_a.style.apply(_ci_a, axis=1), use_container_width=True, hide_index=True)
