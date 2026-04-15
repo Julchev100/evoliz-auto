@@ -652,27 +652,40 @@ with m2:
                     else:
                         st.error("❌ Aucun dossier accessible avec cette cle.")
                 else:
-                    # --- MODE MONO (company_users) : JWT sub = companyid ---
+                    # --- MODE MONO (company_users) ---
                     cid = None
+                    _co_name = None
+                    # 1) Tentative GET /companies (liste) : peut renvoyer le dossier avec son nom
                     try:
-                        import base64 as _b64, json as _jsn
-                        _tok_str = login_data.get("access_token", "")
-                        _parts = _tok_str.split(".")
-                        if len(_parts) >= 2:
-                            _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
-                            _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                            _sub = _payload.get("sub")
-                            if _sub:
-                                try: cid = int(_sub)
-                                except (TypeError, ValueError): cid = _sub
-                    except Exception as _ex:
-                        st.error(f"Erreur decodage JWT : {_ex}")
+                        _r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
+                                              params={"per_page": 100, "page": 1}, timeout=10)
+                        if _r_co.status_code == 200:
+                            _items = _r_co.json().get("data", [])
+                            if _items:
+                                _first = _items[0]
+                                cid = _first.get("companyid") or _first.get("id")
+                                _co_name = _first.get("company_name")
+                    except Exception:
+                        pass
 
+                    # 2) Fallback : JWT sub si GET /companies a echoue
                     if not cid:
-                        st.error("❌ Impossible d'extraire le companyid depuis le token (sub manquant).")
-                    else:
-                        # Recuperer le nom via /companies/{cid}
-                        _co_name = f"Dossier {cid}"
+                        try:
+                            import base64 as _b64, json as _jsn
+                            _tok_str = login_data.get("access_token", "")
+                            _parts = _tok_str.split(".")
+                            if len(_parts) >= 2:
+                                _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
+                                _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                                _sub = _payload.get("sub")
+                                if _sub:
+                                    try: cid = int(_sub)
+                                    except (TypeError, ValueError): cid = _sub
+                        except Exception as _ex:
+                            st.error(f"Erreur decodage JWT : {_ex}")
+
+                    # 3) Si toujours pas de nom : tenter GET /companies/{cid}
+                    if cid and not _co_name:
                         try:
                             _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
                                                   headers=h, timeout=10)
@@ -681,9 +694,14 @@ with m2:
                                 _obj = _body.get("data") if isinstance(_body, dict) else None
                                 if not isinstance(_obj, dict):
                                     _obj = _body if isinstance(_body, dict) else {}
-                                _co_name = _obj.get("company_name") or _co_name
+                                _co_name = _obj.get("company_name")
                         except Exception:
                             pass
+
+                    if not cid:
+                        st.error("❌ Impossible d'extraire le companyid (GET /companies en erreur ET JWT sub absent).")
+                    else:
+                        _co_name = _co_name or f"Dossier {cid}"
                         st.session_state.company_id_105 = cid
                         st.session_state.companies_list = [{
                             "companyid": cid,
