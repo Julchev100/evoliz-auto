@@ -652,10 +652,15 @@ with m2:
                             break
                 except Exception as e:
                     _co_error = str(e)
+                # Normaliser les entrees de _companies : inclure 'name' pour compat retroactive
+                for _c in _companies:
+                    if 'name' not in _c:
+                        _c['name'] = _c.get('company_name') or f"Dossier {_c.get('companyid', '?')}"
                 st.session_state.companies_list = _companies
                 if len(_companies) == 1:
                     st.session_state.company_id_105 = _companies[0].get('companyid') or _companies[0].get('id')
-                    st.success(f"🔑 **Cle plateforme (prescriber_users)** — 1 seul dossier accessible : {_companies[0].get('name', 'N/C')}")
+                    _mode_label = "Cle client (company_users)" if _is_mono else "Cle plateforme (prescriber_users)"
+                    st.success(f"🔑 **{_mode_label}** — 1 dossier accessible : {_companies[0].get('company_name') or _companies[0].get('name', 'N/C')}")
                 elif len(_companies) > 1:
                     st.session_state.company_id_105 = None
                     st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
