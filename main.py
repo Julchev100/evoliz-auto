@@ -615,64 +615,76 @@ with m2:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
-                # WARNING: Le token Evoliz expire au bout de 20 minutes.
-                # Si vous obtenez des erreurs 401, reconnectez-vous via le bouton "Déconnexion".
 
-                # --- Detection AUTO du type de cle ---
-                # `prescriber_users` = cle plateforme multi-dossier
-                # `company_users` = cle client mono-dossier (meme si admin aussi present
-                #                   car admin = droits admin DANS l'entreprise, pas plateforme)
-                _scopes = login_data.get('scopes', []) or []
-                if isinstance(_scopes, str):
-                    _scopes = [s.strip() for s in _scopes.split(',') if s.strip()]
-                _is_multi = ('prescriber_users' in _scopes)
-                _is_mono = ('company_users' in _scopes) and not _is_multi
-                st.session_state["_key_mode"] = "multi" if _is_multi else ("mono" if _is_mono else "unknown")
-
-                _companies = []
-                _co_error = None
-                # Selon doc Evoliz : GET /companies fonctionne pour les 2 types de cles.
-                # Pour company_users, renvoie 1 seul dossier. Pour prescriber_users, la liste complete.
+                # --- Extraction du companyid depuis le JWT sub ---
+                cid = None
                 try:
-                    _pg = 1
-                    while True:
-                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
-                                            params={"per_page": 100, "page": _pg}, timeout=15)
-                        if r_co.status_code == 200:
-                            _d = r_co.json()
-                            _companies.extend(_d.get('data', []))
-                            if _pg >= _d.get("meta", {}).get("last_page", 1):
-                                break
-                            _pg += 1
-                        elif r_co.status_code == 403:
-                            _co_error = f"HTTP 403 sur /companies — sera tente via JWT sub"
-                            break
-                        else:
-                            _co_error = f"HTTP {r_co.status_code} sur /companies"
-                            break
-                except Exception as e:
-                    _co_error = str(e)
-                # Normaliser les entrees de _companies : inclure 'name' pour compat retroactive
-                for _c in _companies:
-                    if 'name' not in _c:
-                        _c['name'] = _c.get('company_name') or f"Dossier {_c.get('companyid', '?')}"
-                st.session_state.companies_list = _companies
-                if len(_companies) == 1:
-                    st.session_state.company_id_105 = _companies[0].get('companyid') or _companies[0].get('id')
-                    _mode_label = "Cle client (company_users)" if _is_mono else "Cle plateforme (prescriber_users)"
-                    st.success(f"🔑 **{_mode_label}** — 1 dossier accessible : {_companies[0].get('company_name') or _companies[0].get('name', 'N/C')}")
-                elif len(_companies) > 1:
-                    st.session_state.company_id_105 = None
-                    st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
-                else:
-                    # GET /companies n'a rien retourne : erreur. Pour les 2 types de cle,
-                    # cet endpoint doit fonctionner (doc Evoliz).
-                    cid = None
+                    import base64 as _b64, json as _jsn
+                    _tok_str = login_data.get("access_token", "")
+                    _parts = _tok_str.split(".")
+                    if len(_parts) >= 2:
+                        _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
+                        _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                        _sub = _payload.get("sub")
+                        if _sub:
+                            try: cid = int(_sub)
+                            except (TypeError, ValueError): cid = _sub
+                except Exception as _ex:
+                    st.error(f"Erreur decodage JWT : {_ex}")
 
-                    # GET /companies n'a pas retourne de dossier -> erreur explicite
-                    st.error(f"❌ Impossible de recuperer vos dossiers Evoliz. {_co_error or 'Verifiez vos cles API.'}")
-                    with st.expander("🔬 Diagnostic login", expanded=False):
-                        st.json(login_data)
+                if not cid:
+                    st.error("❌ Impossible d'extraire le companyid depuis le token (sub manquant).")
+                else:
+                    # Recuperer le nom du dossier via /companies/{cid}
+                    _co_name = f"Dossier {cid}"
+                    try:
+                        _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
+                                              headers=h, timeout=10)
+                        if _r_cn.status_code == 200:
+                            _body = _r_cn.json()
+                            _obj = _body.get("data") if isinstance(_body, dict) else None
+                            if not isinstance(_obj, dict):
+                                _obj = _body if isinstance(_body, dict) else {}
+                            _co_name = _obj.get("company_name") or _co_name
+                    except Exception:
+                        pass
+
+                    st.session_state.company_id_105 = cid
+                    st.session_state.companies_list = [{
+                        "companyid": cid,
+                        "company_name": _co_name,
+                        "name": _co_name,
+                    }]
+                    _scopes = login_data.get("scopes", []) or []
+                    _is_multi = "prescriber_users" in _scopes
+                    st.session_state["_key_mode"] = "multi" if _is_multi else "mono"
+                    _mode_label = "Cle plateforme (prescriber_users)" if _is_multi else "Cle client (company_users)"
+                    st.success(f"🔑 **{_mode_label}** — dossier : **{_co_name}** (ID: {cid})")
+                # NOTE: Le token Evoliz expire au bout de 20 minutes.
+                # Pour prescriber_users (multi-dossier), on complete avec GET /companies.
+                if _is_multi and cid:
+                    try:
+                        _pg = 1; _companies_multi = []
+                        while True:
+                            r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
+                                                params={"per_page": 100, "page": _pg}, timeout=15)
+                            if r_co.status_code == 200:
+                                _d = r_co.json()
+                                _companies_multi.extend(_d.get('data', []))
+                                if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                                _pg += 1
+                            else:
+                                break
+                        # Normaliser name
+                        for _c in _companies_multi:
+                            if 'name' not in _c:
+                                _c['name'] = _c.get('company_name') or f"Dossier {_c.get('companyid', '?')}"
+                        if _companies_multi:
+                            st.session_state.companies_list = _companies_multi
+                            if len(_companies_multi) > 1:
+                                st.session_state.company_id_105 = None  # user doit choisir
+                    except Exception:
+                        pass
             elif r_log.status_code == 401:
                 st.error(f"❌ Echec login : HTTP 401 — **credentials invalides**")
                 with st.expander("🔍 Diagnostic", expanded=True):
