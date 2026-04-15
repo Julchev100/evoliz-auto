@@ -700,34 +700,62 @@ with m2:
                     if cid:
                         _co_name = f"Dossier {cid}"
                         _name_found = False
-                        # Multi strategies : GET /companies (liste), /companies/{cid} (detail), /api/v1/company
+                        _name_debug = []  # pour diagnostic
+
+                        def _find_name_recursive(obj, depth=0, max_depth=4):
+                            """Scan recursif pour trouver n'importe quelle cle ressemblant a company_name."""
+                            if depth > max_depth: return None
+                            if isinstance(obj, dict):
+                                # Priorite : company_name, puis variantes
+                                for _k in ("company_name", "companyName", "company", "raison_sociale", "name"):
+                                    if _k in obj and isinstance(obj[_k], str) and obj[_k].strip():
+                                        # Pour "name" et "company", valider que ce soit au niveau company (pas client)
+                                        if _k in ("name", "company") and depth == 0:
+                                            # skip racine pour ces cles generiques - risque de confusion
+                                            continue
+                                        return obj[_k]
+                                # Recurser dans les sous-dicts
+                                for _v in obj.values():
+                                    _r = _find_name_recursive(_v, depth + 1, max_depth)
+                                    if _r: return _r
+                            elif isinstance(obj, list) and obj:
+                                return _find_name_recursive(obj[0], depth + 1, max_depth)
+                            return None
+
                         for _url_tpl in [
                             f"https://www.evoliz.io/api/v1/companies/{cid}",
                             "https://www.evoliz.io/api/v1/companies",
-                            "https://www.evoliz.io/api/v1/company",  # singulier : certaines versions de l'API
+                            "https://www.evoliz.io/api/v1/company",
                         ]:
                             try:
                                 _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
+                                _name_debug.append({"url": _url_tpl, "status": _r_cn.status_code,
+                                                     "body_start": _r_cn.text[:300] if _r_cn.text else ""})
                                 if _r_cn.status_code != 200:
                                     continue
                                 _body = _r_cn.json() if _r_cn.text else {}
+                                # Priorite 1 : chercher company_name directement
                                 _dv = _body.get("data") if isinstance(_body, dict) else None
                                 _obj = None
-                                if isinstance(_dv, list) and _dv:
-                                    _obj = _dv[0]
-                                elif isinstance(_dv, dict):
-                                    _obj = _dv
-                                elif isinstance(_body, dict) and _body.get("company_name"):
-                                    _obj = _body
+                                if isinstance(_dv, list) and _dv: _obj = _dv[0]
+                                elif isinstance(_dv, dict): _obj = _dv
+                                elif isinstance(_body, dict): _obj = _body
+
                                 if isinstance(_obj, dict):
-                                    _n = _obj.get("company_name")
+                                    _n = _obj.get("company_name") or _obj.get("companyName")
                                     if _n:
                                         _co_name = _n; _name_found = True
                                         _real_cid = _obj.get("companyid") or _obj.get("id")
                                         if _real_cid: cid = _real_cid
                                         break
-                            except Exception:
-                                pass
+                                # Priorite 2 : scan recursif
+                                _n = _find_name_recursive(_body)
+                                if _n:
+                                    _co_name = _n; _name_found = True; break
+                            except Exception as _ex:
+                                _name_debug.append({"url": _url_tpl, "error": str(_ex)[:80]})
+                        # Sauvegarder le debug pour l'utilisateur
+                        st.session_state["_cn_debug"] = _name_debug
                         # Construire une entree dans companies_list pour permettre les appels scoped
                         st.session_state.companies_list = [{
                             "companyid": cid,
@@ -840,6 +868,25 @@ with m2:
         _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
         if _current:
             st.info(f"📂 Dossier actif : **{_get_company_label(_current)}** (ID: {_cid})")
+            # Si le nom n'a pas ete trouve, afficher le debug pour diagnostic
+            if _current.get('company_name', '').startswith('Dossier '):
+                _dbg = st.session_state.get("_cn_debug", [])
+                if _dbg:
+                    with st.expander("🔎 Debug : reponses API pour le nom du dossier", expanded=False):
+                        st.json(_dbg)
+                # Bouton manuel pour tester GET /companies/{cid}
+                if st.button(f"🔄 Retenter la recuperation du nom via /companies/{_cid}", key="btn_refetch_name"):
+                    try:
+                        _r_retry = requests.get(f"https://www.evoliz.io/api/v1/companies/{_cid}",
+                                                 headers=st.session_state.token_headers_105, timeout=5)
+                        if _r_retry.status_code == 200:
+                            _b = _r_retry.json()
+                            with st.expander("📄 Reponse brute GET /companies/{cid}", expanded=True):
+                                st.json(_b)
+                        else:
+                            st.error(f"HTTP {_r_retry.status_code} : {_r_retry.text[:300]}")
+                    except Exception as e:
+                        st.error(f"Erreur : {e}")
 
     # --- Diagnostic API (utile pour debug company_users) ---
     if _cid and st.session_state.token_headers_105:
