@@ -263,7 +263,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
         return False, str(e)
 
 st.title("🍌 Banana Import Club")
-st.caption("Version **v2026.04.15-auth-v3** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
+st.caption("Version **v2026.04.15-auth-v4** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -658,7 +658,7 @@ with m2:
                     _co_name = None
                     _diag_steps = []
 
-                    # 1) GET /companies (liste)
+                    # 1) GET /companies (liste) - peut renvoyer 403 selon droits
                     try:
                         _r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
                                               params={"per_page": 100, "page": 1}, timeout=10)
@@ -673,7 +673,25 @@ with m2:
                     except Exception as _ex:
                         _diag_steps.append({"step": "GET /companies", "error": str(_ex)[:200]})
 
-                    # 2) Fallback JWT sub si pas de cid
+                    # 2) Si pas de cid : ressources scoped (clients/articles/...) contiennent le companyid
+                    if not cid:
+                        for _res in ("clients", "articles", "suppliers", "buys", "invoices", "quotes", "payments"):
+                            try:
+                                _r_res = requests.get(f"https://www.evoliz.io/api/v1/{_res}",
+                                                       headers=h, params={"per_page": 1, "page": 1}, timeout=5)
+                                _diag_steps.append({"step": f"GET /{_res}", "status": _r_res.status_code,
+                                                     "body": _r_res.text[:200]})
+                                if _r_res.status_code == 200:
+                                    _items = _r_res.json().get('data', [])
+                                    if _items:
+                                        _it = _items[0]
+                                        cid = (_it.get('companyid') or _it.get('company_id')
+                                               or (_it.get('company') or {}).get('companyid'))
+                                        if cid: break
+                            except Exception as _ex:
+                                _diag_steps.append({"step": f"GET /{_res}", "error": str(_ex)[:200]})
+
+                    # 3) Dernier recours : JWT sub (peut etre user id plutot que companyid)
                     if not cid:
                         try:
                             import base64 as _b64, json as _jsn
@@ -686,11 +704,11 @@ with m2:
                                 if _sub:
                                     try: cid = int(_sub)
                                     except (TypeError, ValueError): cid = _sub
-                                    _diag_steps.append({"step": "JWT sub", "cid": cid})
+                                    _diag_steps.append({"step": "JWT sub (fallback)", "cid": cid})
                         except Exception as _ex:
                             _diag_steps.append({"step": "JWT decode", "error": str(_ex)[:200]})
 
-                    # 3) GET /companies/{cid} pour le nom
+                    # 4) GET /companies/{cid} pour le nom (si pas encore trouve)
                     if cid and not _co_name:
                         try:
                             _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
