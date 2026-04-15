@@ -87,10 +87,24 @@ def get_correct_id(item, endpoint):
 
 def fetch_evoliz_data(endpoint, headers, company_id=None):
     results = {}
+    # URL avec prefixe en primaire, sans prefixe en fallback (cas company_users avec cid invalide)
+    urls_to_try = []
     if company_id:
-        url = f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}"
-    else:
-        url = f"https://www.evoliz.io/api/v1/{endpoint}"
+        urls_to_try.append(f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}")
+    urls_to_try.append(f"https://www.evoliz.io/api/v1/{endpoint}")
+
+    # Tester chaque URL jusqu'a en trouver une qui repond 200
+    url = None
+    for _u in urls_to_try:
+        try:
+            _r_test = requests.get(_u, headers=headers, params={"per_page": 1, "page": 1}, timeout=10)
+            if _r_test.status_code == 200:
+                url = _u; break
+        except Exception:
+            continue
+    if url is None:
+        return results  # aucune URL accessible
+
     params = {"per_page": 100, "page": 1}
     is_account = endpoint == "accounts"
     try:
@@ -179,17 +193,24 @@ def inject_account(code, label, headers):
 
 def patch_evoliz_item(category, item_id, payload, headers, company_id=None):
     endpoint = ERAZ_ENDPOINTS[category]
+    # Essai 1 : URL company-scoped
+    # Essai 2 : URL sans prefixe (cas company_users avec cid != vrai companyid)
+    urls_to_try = []
     if company_id:
-        url = f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}/{item_id}"
-    else:
-        url = f"https://www.evoliz.io/api/v1/{endpoint}/{item_id}"
-    try:
-        r = requests.patch(url, headers=headers, json=payload, timeout=15)
-        if r.status_code in (200, 204):
-            return True, r.json() if r.status_code == 200 else "OK"
-        return False, f"HTTP {r.status_code}: {r.text[:200]}"
-    except Exception as e:
-        return False, str(e)
+        urls_to_try.append(f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}/{item_id}")
+    urls_to_try.append(f"https://www.evoliz.io/api/v1/{endpoint}/{item_id}")
+    last_err = None
+    for url in urls_to_try:
+        try:
+            r = requests.patch(url, headers=headers, json=payload, timeout=15)
+            if r.status_code in (200, 204):
+                return True, r.json() if r.status_code == 200 else "OK"
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+            if r.status_code not in (403, 404):
+                break  # erreur definitive
+        except Exception as e:
+            last_err = str(e)
+    return False, last_err or "Erreur inconnue"
 
 def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None, vat_rate=None, company_id=None):
     endpoint = FLUX_ENDPOINTS[flux_type]
@@ -240,27 +261,40 @@ ERAZ_ENDPOINTS = {
 
 def delete_evoliz_item(category, item_id, headers, company_id=None):
     endpoint = ERAZ_ENDPOINTS[category]
-    try:
-        r = requests.delete(f"https://www.evoliz.io/api/v1/{endpoint}/{item_id}",
-                            headers=headers, timeout=15)
-        if r.status_code in (200, 204):
-            return True, "Supprimé"
-        # Si le DELETE échoue (flux utilisé), tenter un PATCH enabled=false
-        if category != "COMPTE" and r.status_code in (400, 409, 422):
-            patch_url = f"https://www.evoliz.io/api/v1/{endpoint}/{item_id}"
-            if company_id:
-                patch_url = f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}/{item_id}"
+    # Pattern URL : primaire avec prefixe /companies/{cid}/, fallback sans prefixe
+    urls = []
+    if company_id:
+        urls.append(f"https://www.evoliz.io/api/v1/companies/{company_id}/{endpoint}/{item_id}")
+    urls.append(f"https://www.evoliz.io/api/v1/{endpoint}/{item_id}")
+
+    # Etape 1 : tenter DELETE sur chaque URL
+    last_status = None; last_body = ""
+    for url in urls:
+        try:
+            r = requests.delete(url, headers=headers, timeout=15)
+            last_status = r.status_code; last_body = r.text
+            if r.status_code in (200, 204):
+                return True, "Supprimé"
+            if r.status_code not in (403, 404):
+                break  # erreur non liee aux droits -> inutile de retenter
+        except Exception as e:
+            last_status = -1; last_body = str(e)
+
+    # Etape 2 : DELETE a echoue -> tenter PATCH enabled=false pour "desactiver"
+    # (sauf pour COMPTE qui n'a pas de champ enabled)
+    if category != "COMPTE":
+        for url in urls:
             try:
-                r2 = requests.patch(patch_url, headers=headers,
+                r2 = requests.patch(url, headers=headers,
                                     json={"enabled": False}, timeout=15)
                 if r2.status_code in (200, 204):
                     return True, "Désactivé (enabled=false)"
-                return False, f"DEL HTTP {r.status_code} + PATCH HTTP {r2.status_code}: {r2.text[:150]}"
-            except Exception as e2:
-                return False, f"DEL HTTP {r.status_code} + PATCH erreur: {e2}"
-        return False, f"HTTP {r.status_code}: {r.text[:200]}"
-    except Exception as e:
-        return False, str(e)
+                if r2.status_code not in (403, 404):
+                    break
+            except Exception:
+                pass
+
+    return False, f"HTTP {last_status}: {last_body[:200]}"
 
 st.title("🍌 Banana Import Club")
 st.caption("Version **v2026.04.15-auth-v10** — dossier mono OK, import fichier OK meme sans nom.")
@@ -360,22 +394,24 @@ def load_balance_path():
                 return p
     return ""
 
-# Construction dynamique des onglets
+# Construction dynamique des onglets - uniquement Connexion API tant qu'aucun dossier n'est connecte
 _tab_names = []
 _tab_keys = []
-# Toujours : Connexion API + Import fichiers
 _tab_names.append("🔑 Connexion API"); _tab_keys.append("api")
-_tab_names.append("📁 Import fichiers"); _tab_keys.append("import")
-if mod_compta:
-    _tab_names.append("🔍 Matrice comptable"); _tab_keys.append("matrice")
-if mod_clients:
-    _tab_names.append("👥 Injection Clients"); _tab_keys.append("clients")
-if mod_fournisseurs:
-    _tab_names.append("🏭 Injection Fournisseurs"); _tab_keys.append("fournisseurs")
-if mod_articles:
-    _tab_names.append("📦 Articles"); _tab_keys.append("articles")
-if mod_factures:
-    _tab_names.append("🧾 Factures & Avoirs"); _tab_keys.append("factures")
+
+_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+if _connected:
+    _tab_names.append("📁 Import fichiers"); _tab_keys.append("import")
+    if mod_compta:
+        _tab_names.append("🔍 Matrice comptable"); _tab_keys.append("matrice")
+    if mod_clients:
+        _tab_names.append("👥 Injection Clients"); _tab_keys.append("clients")
+    if mod_fournisseurs:
+        _tab_names.append("🏭 Injection Fournisseurs"); _tab_keys.append("fournisseurs")
+    if mod_articles:
+        _tab_names.append("📦 Articles"); _tab_keys.append("articles")
+    if mod_factures:
+        _tab_names.append("🧾 Factures & Avoirs"); _tab_keys.append("factures")
 
 _tabs = st.tabs(_tab_names)
 _tab_map = {k: t for k, t in zip(_tab_keys, _tabs)}
@@ -443,7 +479,8 @@ def _sheet_selector(f, label, key):
     return 0
 
 # --- Onglet Import fichiers centralise ---
-with m_import:
+if _connected:
+ with m_import:
     st.subheader("📁 Import des fichiers sources")
     st.caption("Centralisez ici tous vos fichiers. Ils seront utilises dans les onglets correspondants.")
 
@@ -647,6 +684,7 @@ with m2:
                         _c0 = _companies_all[0]
                         st.session_state.company_id_105 = _c0.get("companyid")
                         st.success(f"🔑 **Cle plateforme (prescriber_users)** — 1 dossier : **{_c0.get('company_name', 'N/C')}** (ID: {_c0.get('companyid')})")
+                        st.rerun()
                     elif len(_companies_all) > 1:
                         st.session_state.company_id_105 = None
                         st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies_all)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
@@ -692,6 +730,7 @@ with m2:
                         # Mode no-prefix : les URLs /api/v1/{endpoint} fonctionnent nativement
                         st.session_state["_api_no_prefix"] = True
                         st.success(f"🔑 **Cle client (company_users)** — dossier : **{_co_name}** (ID: {cid})")
+                        st.rerun()
             elif r_log.status_code == 401:
                 st.error(f"❌ Echec login : HTTP 401 — **credentials invalides**")
                 with st.expander("🔍 Diagnostic", expanded=True):
@@ -876,7 +915,8 @@ with m2:
                 cp5.metric("Sorties BQ", count_unique(st.session_state.get("ev_data_105", {}).get("SORTIE BQ", {})))
 
 # Le code Balance s'execute dans l'onglet Import fichiers (traitement silencieux)
-with m_import:
+if _connected:
+ with m_import:
   if mod_compta and st.session_state.get('company_id_105') and st.session_state.get('token_headers_105'):
     f105 = st.session_state.get("imp_file_balance")
     if not f105:
@@ -1123,7 +1163,8 @@ with m_import:
             st.session_state.prot_105 = {"comptes": prot_comptes, "flux": prot_flux, "flux_ids": prot_flux_ids}
             st.success(f"Analyse terminée : {len(results)} lignes traitées, {len(rejets)} rejetées → voir onglets Matrice / Rejetées")
 
-with m4:
+if _connected:
+ with m4:
     # Gate : necessite API + dossier + fichier Balance
     _gate_matrice = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105')) and bool(st.session_state.get('imp_file_balance'))
     if not _gate_matrice:
@@ -1783,6 +1824,14 @@ with m7:
 
             # --- Vérification post-exécution ---
             st.subheader("🔎 Vérification post-exécution (GET vs Matrice)")
+            # Refresh des donnees API apres sync : lecture a nouveau des comptes + flux
+            _h_refresh = st.session_state.get("token_headers_105", {})
+            _cid_refresh = st.session_state.get("company_id_105")
+            if _h_refresh and _cid_refresh:
+                with st.spinner("Relecture des donnees API post-sync..."):
+                    st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", _h_refresh, company_id=_cid_refresh)
+                    for _flux_key, _endpoint in FLUX_ENDPOINTS.items():
+                        st.session_state.ev_data_105[_flux_key] = fetch_evoliz_data(_endpoint, _h_refresh, company_id=_cid_refresh)
             df_m = st.session_state.audit_matrix_105
             api_acc = st.session_state.ev_acc_105
             api_data = st.session_state.ev_data_105
@@ -2310,7 +2359,8 @@ def _auto_map_columns(src_columns):
     return mapping
 
 # --- Onglet Injection Clients ---
-with m_cli:
+if _connected:
+ with m_cli:
     _gate_cli = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
     if not _gate_cli:
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
@@ -2548,7 +2598,17 @@ with m_cli:
                 # Lire les entités Evoliz (clients ou fournisseurs) — seulement si API connectée
                 ev_clients = []; ev_by_name = {}; ev_by_siren = {}
                 if headers and cid:
-                    url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}"
+                    # URL avec fallback sans prefixe (cas company_users avec cid invalide)
+                    _url_primary = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}"
+                    _url_fallback = f"https://www.evoliz.io/api/v1/{_entity_api}"
+                    url_cli = _url_primary
+                    # Tester une fois pour determiner l'URL qui fonctionne
+                    try:
+                        _r_test = requests.get(_url_primary, headers=headers, params={"per_page": 1, "page": 1}, timeout=10)
+                        if _r_test.status_code in (403, 404):
+                            url_cli = _url_fallback
+                    except Exception:
+                        url_cli = _url_fallback
                     page = 1
                     while True:
                         r = requests.get(url_cli, headers=headers, params={"per_page": 100, "page": page}, timeout=15)
@@ -3346,7 +3406,28 @@ with m_cli:
         inject_btn = st.button(f"🚀 Injecter les {_entity_label}", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api or bool(_missing_rows))
         if inject_btn and has_api:
             headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
-            url_cli = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}" if cid else f"https://www.evoliz.io/api/v1/{_entity_api}"
+            # URLs avec fallback : prefixe en primaire, sans prefixe en secours (cas company_users avec cid invalide)
+            _url_cli_primary = f"https://www.evoliz.io/api/v1/companies/{cid}/{_entity_api}" if cid else f"https://www.evoliz.io/api/v1/{_entity_api}"
+            _url_cli_fallback = f"https://www.evoliz.io/api/v1/{_entity_api}"
+            url_cli = _url_cli_primary  # pour compat retroactive avec les logs
+
+            def _http_with_fallback(method, suffix, payload):
+                """POST/PATCH avec fallback URL sans prefixe si 403/404."""
+                for _u in [f"{_url_cli_primary}{suffix}", f"{_url_cli_fallback}{suffix}"]:
+                    try:
+                        if method == "POST":
+                            r = requests.post(_u, headers=headers, json=payload, timeout=15)
+                        else:
+                            r = requests.patch(_u, headers=headers, json=payload, timeout=15)
+                        if r.status_code in (200, 201, 204):
+                            return r
+                        if r.status_code not in (403, 404):
+                            return r
+                        if _url_cli_primary == _url_cli_fallback:
+                            return r
+                    except Exception:
+                        pass
+                return r
             ev_ids = st.session_state.get("meg_consol_ev_ids", {})
             df_final = df_preview_c.copy(); df_orig = st.session_state.get("meg_df_clients_original")
             for idx in df_final.index:
@@ -3355,7 +3436,9 @@ with m_cli:
             ci_h = {h.split(" *")[0]: i for i, h in enumerate(_H_ENTITY)}
             _name_col = "Raison sociale" if _is_supplier else "Societe / Nom"
             created=updated=up_to_date=skipped_inj=0; errors=[]; inject_log=[]
-            progress = st.progress(0, text="Injection...")
+
+            # --- Preparation des taches en amont (pas d'IO dans la boucle) ---
+            _tasks = []
             for idx, row in df_final.iterrows():
                 nom = to_clean_str(row.iloc[ci_h[_name_col]]) if ci_h.get(_name_col) is not None else ""
                 if not nom: skipped_inj += 1; continue
@@ -3379,16 +3462,39 @@ with m_cli:
                 adr = to_clean_str(row.iloc[ci_h["Adresse"]]) if ci_h.get("Adresse") is not None else ""
                 if adr: payload["address"]["addr"] = adr
                 client_id = ev_ids.get(idx)
-                if client_id:
-                    r = requests.patch(f"{url_cli}/{client_id}", headers=headers, json=payload, timeout=15)
-                    if r.status_code in (200,204): updated += 1; inject_log.append({"Code":code,"Nom":nom,"Action":"🔄 MAJ","Statut":"✅ OK","Detail":""})
-                    else: errors.append(f"MAJ '{nom}': HTTP {r.status_code}"); inject_log.append({"Code":code,"Nom":nom,"Action":"🔄 MAJ","Statut":f"❌ {r.status_code}","Detail":r.text[:80]})
+                _tasks.append((idx, code, nom, client_id, payload))
+
+            # --- Execution parallele (5 workers, rate-limit Evoliz 100 req/min) ---
+            def _inject_one(task):
+                _idx, _code, _nom, _cid_entity, _payload = task
+                if _cid_entity:
+                    r = _http_with_fallback("PATCH", f"/{_cid_entity}", _payload)
+                    action = "🔄 MAJ"
                 else:
-                    r = requests.post(url_cli, headers=headers, json=payload, timeout=15)
-                    if r.status_code in (200,201): created += 1; inject_log.append({"Code":code,"Nom":nom,"Action":"➕ Creation","Statut":"✅ OK","Detail":""})
-                    elif r.status_code == 400 and "already been taken" in r.text: updated += 1; inject_log.append({"Code":code,"Nom":nom,"Action":"🔄 Existant","Statut":"✅ OK","Detail":""})
-                    else: errors.append(f"Creation '{nom}': HTTP {r.status_code}"); inject_log.append({"Code":code,"Nom":nom,"Action":"➕ Creation","Statut":f"❌ {r.status_code}","Detail":r.text[:80]})
-                progress.progress((idx+1)/len(df_final), text=f"{idx+1}/{len(df_final)} - {nom[:30]}"); time.sleep(0.15)
+                    r = _http_with_fallback("POST", "", _payload)
+                    action = "➕ Creation"
+                return (_idx, _code, _nom, action, r.status_code, r.text[:80])
+
+            progress = st.progress(0.0, text=f"Injection — 0 / {len(_tasks)}")
+            _n_done = 0
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_inject_one, t): t for t in _tasks}
+                for fut in as_completed(futures):
+                    _idx, _code, _nom, action, status, body = fut.result()
+                    if action == "🔄 MAJ":
+                        if status in (200, 204):
+                            updated += 1; inject_log.append({"Code": _code, "Nom": _nom, "Action": action, "Statut": "✅ OK", "Detail": ""})
+                        else:
+                            errors.append(f"MAJ '{_nom}': HTTP {status}"); inject_log.append({"Code": _code, "Nom": _nom, "Action": action, "Statut": f"❌ {status}", "Detail": body})
+                    else:  # Creation
+                        if status in (200, 201):
+                            created += 1; inject_log.append({"Code": _code, "Nom": _nom, "Action": action, "Statut": "✅ OK", "Detail": ""})
+                        elif status == 400 and "already been taken" in body:
+                            updated += 1; inject_log.append({"Code": _code, "Nom": _nom, "Action": "🔄 Existant", "Statut": "✅ OK", "Detail": ""})
+                        else:
+                            errors.append(f"Creation '{_nom}': HTTP {status}"); inject_log.append({"Code": _code, "Nom": _nom, "Action": action, "Statut": f"❌ {status}", "Detail": body})
+                    _n_done += 1
+                    progress.progress(_n_done / max(len(_tasks), 1), text=f"Injection — {_n_done} / {len(_tasks)} — {_nom[:30]}")
             progress.empty()
             st.divider(); st.subheader("📊 Synthese")
             c1,c2,c3,c4 = st.columns(4)
@@ -3407,7 +3513,8 @@ with m_cli:
 
 
 # --- Onglet Injection Fournisseurs ---
-with m_four:
+if _connected:
+ with m_four:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("🏭 Injection Fournisseurs")
@@ -3521,7 +3628,16 @@ with m_four:
 
                 with st.spinner("Lecture des fournisseurs Evoliz..."):
                     ev_four = []; ev_f_by_name = {}
-                    url_four = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                    # URL avec fallback (mono/multi indifferent)
+                    _url_f_pri = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                    _url_f_fb = "https://www.evoliz.io/api/v1/suppliers"
+                    url_four = _url_f_pri
+                    try:
+                        _rt = requests.get(_url_f_pri, headers=headers_f, params={"per_page": 1, "page": 1}, timeout=10)
+                        if _rt.status_code in (403, 404):
+                            url_four = _url_f_fb
+                    except Exception:
+                        url_four = _url_f_fb
                     page_f = 1
                     while True:
                         r_f = requests.get(url_four, headers=headers_f, params={"per_page": 100, "page": page_f}, timeout=15)
@@ -3894,7 +4010,22 @@ with m_four:
                 inject_four_btn = st.button("🚀 Injecter les fournisseurs", type="primary", use_container_width=True, key="btn_inject_four", disabled=not has_api_f or bool(_four_missing))
                 if inject_four_btn and has_api_f:
                     headers_f = st.session_state.token_headers_105; cid_f = st.session_state.company_id_105
-                    url_four = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                    # URL avec fallback (mono/multi indifferent)
+                    _url_fp_pri = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                    _url_fp_fb = "https://www.evoliz.io/api/v1/suppliers"
+                    url_four = _url_fp_pri
+                    def _http_four(method, suffix, payload):
+                        for _u in [f"{_url_fp_pri}{suffix}", f"{_url_fp_fb}{suffix}"]:
+                            try:
+                                if method == "POST":
+                                    r = requests.post(_u, headers=headers_f, json=payload, timeout=15)
+                                else:
+                                    r = requests.patch(_u, headers=headers_f, json=payload, timeout=15)
+                                if r.status_code in (200, 201, 204): return r
+                                if r.status_code not in (403, 404): return r
+                            except Exception:
+                                pass
+                        return r
                     created_f=updated_f=skipped_f=0; errors_f=[]; inject_log_f=[]
                     progress_f = st.progress(0, text="Injection fournisseurs...")
                     for i, cr in enumerate(consol_four):
@@ -3922,11 +4053,11 @@ with m_four:
 
                         entity_id = cr.get("_entityid")
                         if entity_id:
-                            r_f = requests.patch(f"{url_four}/{entity_id}", headers=headers_f, json=payload_f, timeout=15)
+                            r_f = _http_four("PATCH", f"/{entity_id}", payload_f)
                             if r_f.status_code in (200, 204): updated_f += 1; inject_log_f.append({"Code": code, "Nom": nom, "Action": "🔄 MAJ", "Statut": "✅ OK", "Detail": ""})
                             else: errors_f.append(f"MAJ '{nom}': HTTP {r_f.status_code}"); inject_log_f.append({"Code": code, "Nom": nom, "Action": "🔄 MAJ", "Statut": f"❌ {r_f.status_code}", "Detail": r_f.text[:80]})
                         else:
-                            r_f = requests.post(url_four, headers=headers_f, json=payload_f, timeout=15)
+                            r_f = _http_four("POST", "", payload_f)
                             if r_f.status_code in (200, 201): created_f += 1; inject_log_f.append({"Code": code, "Nom": nom, "Action": "➕ Creation", "Statut": "✅ OK", "Detail": ""})
                             elif r_f.status_code == 400 and "already been taken" in r_f.text: updated_f += 1; inject_log_f.append({"Code": code, "Nom": nom, "Action": "🔄 Existant", "Statut": "✅ OK", "Detail": ""})
                             else: errors_f.append(f"Creation '{nom}': HTTP {r_f.status_code}"); inject_log_f.append({"Code": code, "Nom": nom, "Action": "➕ Creation", "Statut": f"❌ {r_f.status_code}", "Detail": r_f.text[:80]})
@@ -3944,7 +4075,8 @@ with m_four:
 
 
 # --- Onglet Bascule Factures ---
-with m_fac:
+if _connected:
+ with m_fac:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("🧾 Bascule Factures, Avoirs & Paiements MEG")
@@ -4045,7 +4177,8 @@ with m_fac:
                 st.download_button("Telecharger le ZIP",data=zb.getvalue(),file_name="Gabarit_Facture_Paiement_Avoir.zip",mime="application/zip",key="dl_meg_fac")
 
 # --- Onglet Bascule Articles ---
-with m_art:
+if _connected:
+ with m_art:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("📦 Articles — Injection API Evoliz")
@@ -4878,7 +5011,22 @@ with m_art:
                                 with st.expander("Detail erreurs"):
                                     for e in _errs_cl: st.text(e)
                             st.markdown("### 📦 Etape 2 : Injection des articles")
-                        url_art = f"https://www.evoliz.io/api/v1/companies/{cid}/articles"
+                        # URLs avec fallback (mono/multi indifferent)
+                        _url_ap_pri = f"https://www.evoliz.io/api/v1/companies/{cid}/articles"
+                        _url_ap_fb = "https://www.evoliz.io/api/v1/articles"
+                        url_art = _url_ap_pri
+                        def _http_art(method, suffix, payload):
+                            for _u in [f"{_url_ap_pri}{suffix}", f"{_url_ap_fb}{suffix}"]:
+                                try:
+                                    if method == "POST":
+                                        r = requests.post(_u, headers=headers, json=payload, timeout=15)
+                                    else:
+                                        r = requests.patch(_u, headers=headers, json=payload, timeout=15)
+                                    if r.status_code in (200, 201, 204): return r
+                                    if r.status_code not in (403, 404): return r
+                                except Exception:
+                                    pass
+                            return r
                         created_a = updated_a = skipped_a = 0; errors_a = []; inject_log_a = []
                         # On n'envoie que les articles du fichier (Nouveaux + Doublons)
                         _to_inject = [a for a in consol_art if "Evoliz seul" not in a["_source"]]
@@ -4925,14 +5073,14 @@ with m_art:
                             entity_id = a.get("_entityid")
                             try:
                                 if entity_id:
-                                    r = requests.patch(f"{url_art}/{entity_id}", headers=headers, json=payload, timeout=15)
+                                    r = _http_art("PATCH", f"/{entity_id}", payload)
                                     if r.status_code in (200, 204):
                                         updated_a += 1; inject_log_a.append({"Reference": a["Reference"], "Action": "🔄 MAJ", "Statut": "✅ OK", "Detail": ""})
                                     else:
                                         errors_a.append(f"MAJ '{a['Reference']}': HTTP {r.status_code}")
                                         inject_log_a.append({"Reference": a["Reference"], "Action": "🔄 MAJ", "Statut": f"❌ {r.status_code}", "Detail": r.text[:80]})
                                 else:
-                                    r = requests.post(url_art, headers=headers, json=payload, timeout=15)
+                                    r = _http_art("POST", "", payload)
                                     if r.status_code in (200, 201):
                                         created_a += 1; inject_log_a.append({"Reference": a["Reference"], "Action": "➕ Creation", "Statut": "✅ OK", "Detail": ""})
                                     elif r.status_code == 400 and "already been taken" in r.text:
