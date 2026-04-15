@@ -616,75 +616,81 @@ with m2:
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
 
-                # --- Extraction du companyid depuis le JWT sub ---
-                cid = None
-                try:
-                    import base64 as _b64, json as _jsn
-                    _tok_str = login_data.get("access_token", "")
-                    _parts = _tok_str.split(".")
-                    if len(_parts) >= 2:
-                        _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
-                        _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                        _sub = _payload.get("sub")
-                        if _sub:
-                            try: cid = int(_sub)
-                            except (TypeError, ValueError): cid = _sub
-                except Exception as _ex:
-                    st.error(f"Erreur decodage JWT : {_ex}")
+                _scopes = login_data.get("scopes", []) or []
+                if isinstance(_scopes, str):
+                    _scopes = [s.strip() for s in _scopes.split(",") if s.strip()]
+                _is_multi = "prescriber_users" in _scopes
+                st.session_state["_key_mode"] = "multi" if _is_multi else "mono"
 
-                if not cid:
-                    st.error("❌ Impossible d'extraire le companyid depuis le token (sub manquant).")
-                else:
-                    # Recuperer le nom du dossier via /companies/{cid}
-                    _co_name = f"Dossier {cid}"
+                # --- MODE MULTI (prescriber_users) : GET /companies liste tous les dossiers ---
+                if _is_multi:
+                    _companies_all = []
                     try:
-                        _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
-                                              headers=h, timeout=10)
-                        if _r_cn.status_code == 200:
-                            _body = _r_cn.json()
-                            _obj = _body.get("data") if isinstance(_body, dict) else None
-                            if not isinstance(_obj, dict):
-                                _obj = _body if isinstance(_body, dict) else {}
-                            _co_name = _obj.get("company_name") or _co_name
-                    except Exception:
-                        pass
-
-                    st.session_state.company_id_105 = cid
-                    st.session_state.companies_list = [{
-                        "companyid": cid,
-                        "company_name": _co_name,
-                        "name": _co_name,
-                    }]
-                    _scopes = login_data.get("scopes", []) or []
-                    _is_multi = "prescriber_users" in _scopes
-                    st.session_state["_key_mode"] = "multi" if _is_multi else "mono"
-                    _mode_label = "Cle plateforme (prescriber_users)" if _is_multi else "Cle client (company_users)"
-                    st.success(f"🔑 **{_mode_label}** — dossier : **{_co_name}** (ID: {cid})")
-                # NOTE: Le token Evoliz expire au bout de 20 minutes.
-                # Pour prescriber_users (multi-dossier), on complete avec GET /companies.
-                if _is_multi and cid:
-                    try:
-                        _pg = 1; _companies_multi = []
+                        _pg = 1
                         while True:
                             r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
                                                 params={"per_page": 100, "page": _pg}, timeout=15)
-                            if r_co.status_code == 200:
-                                _d = r_co.json()
-                                _companies_multi.extend(_d.get('data', []))
-                                if _pg >= _d.get("meta", {}).get("last_page", 1): break
-                                _pg += 1
-                            else:
-                                break
-                        # Normaliser name
-                        for _c in _companies_multi:
-                            if 'name' not in _c:
-                                _c['name'] = _c.get('company_name') or f"Dossier {_c.get('companyid', '?')}"
-                        if _companies_multi:
-                            st.session_state.companies_list = _companies_multi
-                            if len(_companies_multi) > 1:
-                                st.session_state.company_id_105 = None  # user doit choisir
-                    except Exception:
-                        pass
+                            if r_co.status_code != 200: break
+                            _d = r_co.json()
+                            _companies_all.extend(_d.get("data", []))
+                            if _pg >= _d.get("meta", {}).get("last_page", 1): break
+                            _pg += 1
+                    except Exception as e:
+                        st.error(f"Erreur GET /companies : {e}")
+                    # Normaliser name
+                    for _c in _companies_all:
+                        if "name" not in _c:
+                            _c["name"] = _c.get("company_name") or f"Dossier {_c.get('companyid', '?')}"
+                    st.session_state.companies_list = _companies_all
+                    if len(_companies_all) == 1:
+                        _c0 = _companies_all[0]
+                        st.session_state.company_id_105 = _c0.get("companyid")
+                        st.success(f"🔑 **Cle plateforme (prescriber_users)** — 1 dossier : **{_c0.get('company_name', 'N/C')}** (ID: {_c0.get('companyid')})")
+                    elif len(_companies_all) > 1:
+                        st.session_state.company_id_105 = None
+                        st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies_all)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
+                    else:
+                        st.error("❌ Aucun dossier accessible avec cette cle.")
+                else:
+                    # --- MODE MONO (company_users) : JWT sub = companyid ---
+                    cid = None
+                    try:
+                        import base64 as _b64, json as _jsn
+                        _tok_str = login_data.get("access_token", "")
+                        _parts = _tok_str.split(".")
+                        if len(_parts) >= 2:
+                            _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
+                            _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                            _sub = _payload.get("sub")
+                            if _sub:
+                                try: cid = int(_sub)
+                                except (TypeError, ValueError): cid = _sub
+                    except Exception as _ex:
+                        st.error(f"Erreur decodage JWT : {_ex}")
+
+                    if not cid:
+                        st.error("❌ Impossible d'extraire le companyid depuis le token (sub manquant).")
+                    else:
+                        # Recuperer le nom via /companies/{cid}
+                        _co_name = f"Dossier {cid}"
+                        try:
+                            _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}",
+                                                  headers=h, timeout=10)
+                            if _r_cn.status_code == 200:
+                                _body = _r_cn.json()
+                                _obj = _body.get("data") if isinstance(_body, dict) else None
+                                if not isinstance(_obj, dict):
+                                    _obj = _body if isinstance(_body, dict) else {}
+                                _co_name = _obj.get("company_name") or _co_name
+                        except Exception:
+                            pass
+                        st.session_state.company_id_105 = cid
+                        st.session_state.companies_list = [{
+                            "companyid": cid,
+                            "company_name": _co_name,
+                            "name": _co_name,
+                        }]
+                        st.success(f"🔑 **Cle client (company_users)** — dossier : **{_co_name}** (ID: {cid})")
             elif r_log.status_code == 401:
                 st.error(f"❌ Echec login : HTTP 401 — **credentials invalides**")
                 with st.expander("🔍 Diagnostic", expanded=True):
