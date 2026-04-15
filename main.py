@@ -575,11 +575,14 @@ with m2:
                 # WARNING: Le token Evoliz expire au bout de 20 minutes.
                 # Si vous obtenez des erreurs 401, reconnectez-vous via le bouton "Déconnexion".
 
-                # --- Detection AUTO du type de cle : prescriber_users (multi) vs company_users (mono) ---
+                # --- Detection AUTO du type de cle ---
+                # `prescriber_users` = cle plateforme multi-dossier
+                # `company_users` = cle client mono-dossier (meme si admin aussi present
+                #                   car admin = droits admin DANS l'entreprise, pas plateforme)
                 _scopes = login_data.get('scopes', []) or []
                 if isinstance(_scopes, str):
                     _scopes = [s.strip() for s in _scopes.split(',') if s.strip()]
-                _is_multi = ('prescriber_users' in _scopes) or ('admin' in _scopes)
+                _is_multi = ('prescriber_users' in _scopes)
                 _is_mono = ('company_users' in _scopes) and not _is_multi
                 st.session_state["_key_mode"] = "multi" if _is_multi else ("mono" if _is_mono else "unknown")
 
@@ -617,28 +620,58 @@ with m2:
                     st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
                 else:
                     # Pas de scope prescriber_users -> token company_users (mono-dossier)
-                    # Chercher le companyid dans toutes les cles possibles du payload login
-                    cid = (login_data.get('companyid')
-                           or login_data.get('company_id')
-                           or login_data.get('companyId')
-                           or (login_data.get('company') or {}).get('companyid')
-                           or (login_data.get('company') or {}).get('id')
-                           or (login_data.get('user') or {}).get('companyid'))
-                    # Si toujours rien : tenter d'extraire du scope ou faire un GET qui revelera le cid
-                    if not cid:
-                        try:
-                            # Le scope company_users a acces a /api/v1/account ou /api/v1/self
-                            for _probe in ["account", "self", "user", "me"]:
-                                _r_probe = requests.get(f"https://www.evoliz.io/api/v1/{_probe}", headers=h, timeout=10)
-                                if _r_probe.status_code == 200:
-                                    _dp = _r_probe.json()
-                                    cid = (_dp.get('companyid') or _dp.get('company_id')
-                                           or (_dp.get('data') or {}).get('companyid')
-                                           or (_dp.get('company') or {}).get('companyid'))
-                                    if cid: break
-                        except Exception:
-                            pass
-                    # Dernier recours : decoder le JWT pour recuperer le cid
+                    st.info("🔐 **Cle client (company_users)** detectee. Recherche du companyid...")
+                    _status = st.empty()
+                    cid = None
+
+                    with st.spinner("Detection du companyid..."):
+                        # 1) Chercher dans le payload login
+                        _status.caption("1/4 — lecture du payload login...")
+                        cid = (login_data.get('companyid')
+                               or login_data.get('company_id')
+                               or login_data.get('companyId')
+                               or (login_data.get('company') or {}).get('companyid')
+                               or (login_data.get('company') or {}).get('id')
+                               or (login_data.get('user') or {}).get('companyid'))
+
+                        # 2) Probe endpoints self (timeout court)
+                        if not cid:
+                            _status.caption("2/4 — test des endpoints self...")
+                            for _probe in ["account", "self", "user", "users/me", "me", "profile", "company"]:
+                                try:
+                                    _r_probe = requests.get(f"https://www.evoliz.io/api/v1/{_probe}", headers=h, timeout=5)
+                                    if _r_probe.status_code == 200:
+                                        _dp = _r_probe.json()
+                                        _data_obj = _dp.get('data') if isinstance(_dp, dict) else None
+                                        for _obj in [_dp, _data_obj, (_dp.get('company') or {}) if isinstance(_dp, dict) else {}]:
+                                            if not isinstance(_obj, dict): continue
+                                            for _k in ('companyid', 'company_id', 'companyId', 'id'):
+                                                if _obj.get(_k) and str(_obj.get(_k)).isdigit():
+                                                    cid = _obj.get(_k); break
+                                            if cid: break
+                                        if cid: break
+                                except Exception:
+                                    pass
+
+                        # 3) Probe ressources scoped (/clients/buys) = contiennent le companyid
+                        if not cid:
+                            _status.caption("3/4 — lecture d'une ressource scoped (clients/buys)...")
+                            for _res in ["clients", "buys", "articles", "suppliers"]:
+                                try:
+                                    _r_res = requests.get(f"https://www.evoliz.io/api/v1/{_res}", headers=h, params={"per_page": 1, "page": 1}, timeout=5)
+                                    if _r_res.status_code == 200:
+                                        _items = _r_res.json().get('data', [])
+                                        if _items:
+                                            cid = (_items[0].get('companyid') or _items[0].get('company_id')
+                                                   or (_items[0].get('company') or {}).get('companyid'))
+                                            if cid: break
+                                except Exception:
+                                    pass
+
+                        # 4) Decodage JWT
+                        if not cid:
+                            _status.caption("4/4 — decodage du JWT...")
+                    # Dernier recours : decoder le JWT (sub = user ID, mais parfois companyid present)
                     if not cid:
                         try:
                             import base64 as _b64, json as _jsn
@@ -674,13 +707,57 @@ with m2:
                         st.session_state["_key_mode"] = "mono"
                         st.success(f"🔐 **Cle client (company_users)** — mono-dossier : {_co_name} (ID: {cid})")
                     else:
-                        with st.expander("🔬 Diagnostic login (debug)", expanded=True):
+                        st.warning("🔐 **Cle client connectee** mais le companyid n'a pas pu etre detecte automatiquement. Saisissez-le manuellement ci-dessous (visible dans l'URL Evoliz : `https://xxx.evoliz.com/#/...` ou dans vos parametres API).")
+                        with st.expander("🔬 Diagnostic login (debug)", expanded=False):
                             st.json(login_data)
-                        st.warning("Connecté mais aucun dossier détecté. Pour un token company_users, le companyid devrait figurer dans la reponse de login. Contactez le support Evoliz si le probleme persiste.")
+            elif r_log.status_code == 401:
+                st.error(f"❌ Echec login : HTTP 401 — **credentials invalides**")
+                with st.expander("🔍 Diagnostic", expanded=True):
+                    st.markdown("""
+                    **Causes possibles** :
+                    - La **Public Key** ou la **Secret Key** est incorrecte (verifier la copie depuis Evoliz)
+                    - La paire de cles a ete **revoque/regeneree** depuis Evoliz → recreer une nouvelle paire
+                    - Les cles sont expirees (duree de vie configuree cote Evoliz)
+                    - Espaces parasites en debut/fin de cle
+
+                    **Verification** :
+                    1. Connecte-toi sur ton compte Evoliz (fiteco.evoliz.com ou equivalent)
+                    2. Va dans **Parametres > API** (ou **Mon compte > Cles API**)
+                    3. Cree une **nouvelle paire de cles de type Client** (company_users)
+                    4. Copie-colle integralement sans espaces
+                    5. Utilise cette paire ici
+                    """)
+                    st.caption(f"Reponse brute : `{r_log.text[:200]}`")
             else:
                 st.error(f"Échec login : HTTP {r_log.status_code} — {r_log.text[:300]}")
         else:
             st.warning("Renseignez la Public Key et la Secret Key pour vous connecter.")
+
+    # --- Bloc 2bis : Saisie manuelle du companyid (fallback pour cles client sans cid auto-detecte) ---
+    if (st.session_state.token_headers_105
+        and not st.session_state.get('company_id_105')
+        and not st.session_state.get('companies_list')
+        and st.session_state.get('_key_mode') == 'mono'):
+        st.divider()
+        st.subheader("🆔 Saisie manuelle du companyid")
+        st.caption("Impossible de detecter automatiquement votre dossier. Saisissez le companyid (identifiant numerique) de votre dossier Evoliz.")
+        _manual_cid = st.number_input("CompanyID", min_value=1, step=1, key="manual_cid", value=None, placeholder="ex: 12345")
+        if st.button("✅ Valider le companyid", key="btn_validate_cid") and _manual_cid:
+            # Verifier que l'ID fonctionne via un GET
+            try:
+                _r_test = requests.get(f"https://www.evoliz.io/api/v1/companies/{int(_manual_cid)}",
+                                        headers=st.session_state.token_headers_105, timeout=10)
+                if _r_test.status_code == 200:
+                    _d = _r_test.json()
+                    _name = (_d.get('data') or _d).get('company_name', f"Dossier {_manual_cid}") if isinstance(_d, dict) else f"Dossier {_manual_cid}"
+                    st.session_state.company_id_105 = int(_manual_cid)
+                    st.session_state.companies_list = [{"companyid": int(_manual_cid), "company_name": _name, "name": _name}]
+                    st.success(f"✅ Dossier valide : {_name} (ID: {_manual_cid})")
+                    st.rerun()
+                else:
+                    st.error(f"Impossible de valider ce companyid (HTTP {_r_test.status_code}). Verifiez le numero.")
+            except Exception as e:
+                st.error(f"Erreur de validation : {e}")
 
     # --- Bloc 2 : Sélecteur de dossier (multi-company) ---
     _companies = st.session_state.get('companies_list', [])
