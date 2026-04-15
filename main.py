@@ -765,20 +765,6 @@ with m2:
         _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
         if _current:
             st.info(f"📂 Dossier actif : **{_get_company_label(_current)}** (ID: {_cid})")
-                # Bouton manuel pour tester GET /companies/{cid}
-                if st.button(f"🔄 Retenter la recuperation du nom via /companies/{_cid}", key="btn_refetch_name"):
-                    try:
-                        _r_retry = requests.get(f"https://www.evoliz.io/api/v1/companies/{_cid}",
-                                                 headers=st.session_state.token_headers_105, timeout=5)
-                        if _r_retry.status_code == 200:
-                            _b = _r_retry.json()
-                            with st.expander("📄 Reponse brute GET /companies/{cid}", expanded=True):
-                                st.json(_b)
-                        else:
-                            st.error(f"HTTP {_r_retry.status_code} : {_r_retry.text[:300]}")
-                    except Exception as e:
-                        st.error(f"Erreur : {e}")
-
 
     # --- Bloc 3 : Chargement des données ---
     _is_multi = len(st.session_state.get('companies_list', [])) > 1
