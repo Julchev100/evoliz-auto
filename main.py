@@ -678,20 +678,27 @@ with m2:
                                 if len(_parts) >= 2:
                                     _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
                                     _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                                    # `sub` = companyid pour les cles company_users (Customer number Evoliz)
+                                    # Candidat = sub (Customer number Evoliz pour company_users)
                                     _candidate = (_payload.get('companyid') or _payload.get('company_id')
                                                    or _payload.get('cid') or _payload.get('company')
                                                    or _payload.get('sub'))
-                                    # Valider via GET /companies/{candidate}
+                                    # Valider : tester plusieurs endpoints avec ce cid
                                     if _candidate:
-                                        try:
-                                            _r_val = requests.get(f"https://www.evoliz.io/api/v1/companies/{_candidate}", headers=h, timeout=5)
-                                            if _r_val.status_code == 200:
-                                                cid = _candidate
-                                        except Exception:
-                                            pass
-                                        # Si le GET ne valide pas, tenter quand meme (certaines API renvoient 404 meme si cid correct)
-                                        if not cid:
+                                        _validated = False
+                                        for _val_url in [
+                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}/clients?per_page=1",
+                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}/articles?per_page=1",
+                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}",
+                                            f"https://www.evoliz.io/api/v1/companies/{_candidate}/settings/features",
+                                        ]:
+                                            try:
+                                                _r_val = requests.get(_val_url, headers=h, timeout=5)
+                                                if _r_val.status_code in (200, 201):
+                                                    cid = _candidate; _validated = True; break
+                                            except Exception:
+                                                pass
+                                        # Si aucune validation mais candidat present, on l'utilise quand meme
+                                        if not _validated:
                                             cid = _candidate
                             except Exception:
                                 pass
@@ -700,15 +707,33 @@ with m2:
                     if _co_error:
                         st.info(f"GET /companies : {_co_error}")
                     if cid:
-                        # Tenter de recuperer le nom du dossier via GET /companies/{cid}
+                        # Tenter de recuperer le nom du dossier via plusieurs endpoints
+                        # (company_users n'a souvent pas acces a /companies/{cid} directement)
                         _co_name = f"Dossier {cid}"
-                        try:
-                            _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}", headers=h, timeout=10)
-                            if _r_cn.status_code == 200:
-                                _cn = _r_cn.json().get('data') or _r_cn.json()
-                                _co_name = _cn.get('company_name') or _cn.get('name') or _co_name
-                        except Exception:
-                            pass
+                        _name_found = False
+                        for _url_tpl in [
+                            f"https://www.evoliz.io/api/v1/companies/{cid}",
+                            f"https://www.evoliz.io/api/v1/companies/{cid}/settings/features",
+                            f"https://www.evoliz.io/api/v1/companies/{cid}/settings/pdf",
+                            f"https://www.evoliz.io/api/v1/companies/{cid}/clients?per_page=1",
+                        ]:
+                            try:
+                                _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
+                                if _r_cn.status_code == 200:
+                                    _body = _r_cn.json() if _r_cn.text else {}
+                                    # Essayer plusieurs chemins pour recuperer le nom
+                                    for _obj in [_body, _body.get("data"),
+                                                 (_body.get("data") or [{}])[0] if isinstance(_body.get("data"), list) else None,
+                                                 _body.get("company")]:
+                                        if not isinstance(_obj, dict): continue
+                                        _n = (_obj.get("company_name") or _obj.get("name")
+                                              or (_obj.get("company") or {}).get("company_name")
+                                              or (_obj.get("company") or {}).get("name"))
+                                        if _n:
+                                            _co_name = _n; _name_found = True; break
+                                    if _name_found: break
+                            except Exception:
+                                pass
                         # Construire une entree dans companies_list pour permettre les appels scoped
                         st.session_state.companies_list = [{
                             "companyid": cid,
@@ -814,6 +839,8 @@ with m2:
 
 
     # --- Affichage du dossier actif ---
+    def _get_company_label(c):
+        return c.get('company_name') or c.get('name') or f"Company {c.get('companyid')}"
     _cid = st.session_state.company_id_105
     if _cid and _companies:
         _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
