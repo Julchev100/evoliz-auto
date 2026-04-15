@@ -537,6 +537,7 @@ with m2:
     st.subheader("🔑 Connexion Evoliz")
     saved_pk, saved_sk = load_creds()
     col_pk, col_sk = st.columns(2)
+    st.caption("🔐 L'app detecte automatiquement le type de cle : **client** (company_users — mono-dossier) ou **plateforme** (prescriber_users — multi-dossier).")
     pk_105 = col_pk.text_input("Public Key", value=saved_pk, key="pk_105")
     sk_105 = col_sk.text_input("Secret Key", type="password", value=saved_sk, key="sk_105")
 
@@ -573,35 +574,47 @@ with m2:
                 st.session_state.token_headers_105 = h
                 # WARNING: Le token Evoliz expire au bout de 20 minutes.
                 # Si vous obtenez des erreurs 401, reconnectez-vous via le bouton "Déconnexion".
-                # Découverte des dossiers accessibles (paginé)
+
+                # --- Detection AUTO du type de cle : prescriber_users (multi) vs company_users (mono) ---
+                _scopes = login_data.get('scopes', []) or []
+                if isinstance(_scopes, str):
+                    _scopes = [s.strip() for s in _scopes.split(',') if s.strip()]
+                _is_multi = ('prescriber_users' in _scopes) or ('admin' in _scopes)
+                _is_mono = ('company_users' in _scopes) and not _is_multi
+                st.session_state["_key_mode"] = "multi" if _is_multi else ("mono" if _is_mono else "unknown")
+
                 _companies = []
                 _co_error = None
-                try:
-                    _pg = 1
-                    while True:
-                        r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
-                                            params={"per_page": 100, "page": _pg}, timeout=15)
-                        if r_co.status_code == 200:
-                            _d = r_co.json()
-                            _companies.extend(_d.get('data', []))
-                            if _pg >= _d.get("meta", {}).get("last_page", 1):
+                # Tentative GET /companies uniquement si la cle est jugee multi (ou inconnu)
+                if _is_multi or not _is_mono:
+                    try:
+                        _pg = 1
+                        while True:
+                            r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
+                                                params={"per_page": 100, "page": _pg}, timeout=15)
+                            if r_co.status_code == 200:
+                                _d = r_co.json()
+                                _companies.extend(_d.get('data', []))
+                                if _pg >= _d.get("meta", {}).get("last_page", 1):
+                                    break
+                                _pg += 1
+                            elif r_co.status_code == 403:
+                                _co_error = "scope prescriber_users absent — bascule en mode mono-dossier"
+                                _is_mono = True; _is_multi = False
+                                st.session_state["_key_mode"] = "mono"
                                 break
-                            _pg += 1
-                        elif r_co.status_code == 403:
-                            _co_error = "scope prescriber_users absent — mode mono-dossier"
-                            break
-                        else:
-                            _co_error = f"HTTP {r_co.status_code}"
-                            break
-                except Exception as e:
-                    _co_error = str(e)
+                            else:
+                                _co_error = f"HTTP {r_co.status_code}"
+                                break
+                    except Exception as e:
+                        _co_error = str(e)
                 st.session_state.companies_list = _companies
                 if len(_companies) == 1:
                     st.session_state.company_id_105 = _companies[0].get('companyid') or _companies[0].get('id')
-                    st.success(f"Connecté à Evoliz — dossier : {_companies[0].get('name', 'N/C')}")
+                    st.success(f"🔑 **Cle plateforme (prescriber_users)** — 1 seul dossier accessible : {_companies[0].get('name', 'N/C')}")
                 elif len(_companies) > 1:
                     st.session_state.company_id_105 = None
-                    st.success(f"Connecté à Evoliz — {len(_companies)} dossiers accessibles. Sélectionnez un dossier ci-dessous.")
+                    st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
                 else:
                     # Pas de scope prescriber_users -> token company_users (mono-dossier)
                     # Chercher le companyid dans toutes les cles possibles du payload login
@@ -643,13 +656,23 @@ with m2:
                     if _co_error:
                         st.info(f"GET /companies : {_co_error}")
                     if cid:
-                        # Construire une entree factice dans companies_list pour permettre les appels scoped
+                        # Tenter de recuperer le nom du dossier via GET /companies/{cid}
+                        _co_name = f"Dossier {cid}"
+                        try:
+                            _r_cn = requests.get(f"https://www.evoliz.io/api/v1/companies/{cid}", headers=h, timeout=10)
+                            if _r_cn.status_code == 200:
+                                _cn = _r_cn.json().get('data') or _r_cn.json()
+                                _co_name = _cn.get('company_name') or _cn.get('name') or _co_name
+                        except Exception:
+                            pass
+                        # Construire une entree dans companies_list pour permettre les appels scoped
                         st.session_state.companies_list = [{
                             "companyid": cid,
-                            "company_name": f"Dossier {cid}",
-                            "name": f"Dossier {cid}",
+                            "company_name": _co_name,
+                            "name": _co_name,
                         }]
-                        st.success(f"Connecté à Evoliz — mono-dossier (company_users, company: {cid})")
+                        st.session_state["_key_mode"] = "mono"
+                        st.success(f"🔐 **Cle client (company_users)** — mono-dossier : {_co_name} (ID: {cid})")
                     else:
                         with st.expander("🔬 Diagnostic login (debug)", expanded=True):
                             st.json(login_data)
