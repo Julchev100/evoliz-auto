@@ -665,115 +665,14 @@ with m2:
                     st.session_state.company_id_105 = None
                     st.success(f"🔑 **Cle plateforme (prescriber_users)** — {len(_companies)} dossiers accessibles. Selectionnez un dossier ci-dessous.")
                 else:
-                    # Pas de scope prescriber_users -> token company_users (mono-dossier)
+                    # GET /companies n'a rien retourne : erreur. Pour les 2 types de cle,
+                    # cet endpoint doit fonctionner (doc Evoliz).
                     cid = None
-                    _company_name_from_api = None
 
-                    # 1) Essayer GET /api/v1/clients (sans prefixe) : la reponse contient le companyid
-                    try:
-                        _r_cli = requests.get("https://www.evoliz.io/api/v1/clients",
-                                              headers=h, params={"per_page": 1, "page": 1}, timeout=5)
-                        if _r_cli.status_code == 200:
-                            _items = _r_cli.json().get('data', [])
-                            if _items:
-                                cid = (_items[0].get('companyid') or _items[0].get('company_id')
-                                       or (_items[0].get('company') or {}).get('companyid'))
-                    except Exception:
-                        pass
-
-                    # 2) Fallback : JWT decode (sub = Customer number Evoliz)
-                    if not cid:
-                        try:
-                            import base64 as _b64, json as _jsn
-                            _tok = login_data.get('access_token', '')
-                            _parts = _tok.split('.')
-                            if len(_parts) >= 2:
-                                _pad = _parts[1] + '=' * (-len(_parts[1]) % 4)
-                                _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
-                                cid = (_payload.get('companyid') or _payload.get('company_id')
-                                       or _payload.get('cid') or _payload.get('sub'))
-                        except Exception:
-                            pass
-                    # 3) Fallback : payload login
-                    if not cid:
-                        cid = (login_data.get('companyid') or login_data.get('company_id')
-                               or (login_data.get('company') or {}).get('companyid'))
-
-                    st.session_state.company_id_105 = cid
-                    if _co_error:
-                        st.info(f"GET /companies : {_co_error}")
-                    if cid:
-                        _co_name = f"Dossier {cid}"
-                        _name_found = False
-                        _name_debug = []  # pour diagnostic
-
-                        def _find_name_recursive(obj, depth=0, max_depth=4):
-                            """Scan recursif pour trouver n'importe quelle cle ressemblant a company_name."""
-                            if depth > max_depth: return None
-                            if isinstance(obj, dict):
-                                # Priorite : company_name, puis variantes
-                                for _k in ("company_name", "companyName", "company", "raison_sociale", "name"):
-                                    if _k in obj and isinstance(obj[_k], str) and obj[_k].strip():
-                                        # Pour "name" et "company", valider que ce soit au niveau company (pas client)
-                                        if _k in ("name", "company") and depth == 0:
-                                            # skip racine pour ces cles generiques - risque de confusion
-                                            continue
-                                        return obj[_k]
-                                # Recurser dans les sous-dicts
-                                for _v in obj.values():
-                                    _r = _find_name_recursive(_v, depth + 1, max_depth)
-                                    if _r: return _r
-                            elif isinstance(obj, list) and obj:
-                                return _find_name_recursive(obj[0], depth + 1, max_depth)
-                            return None
-
-                        for _url_tpl in [
-                            f"https://www.evoliz.io/api/v1/companies/{cid}",
-                            "https://www.evoliz.io/api/v1/companies",
-                            "https://www.evoliz.io/api/v1/company",
-                        ]:
-                            try:
-                                _r_cn = requests.get(_url_tpl, headers=h, timeout=5)
-                                _name_debug.append({"url": _url_tpl, "status": _r_cn.status_code,
-                                                     "body_start": _r_cn.text[:300] if _r_cn.text else ""})
-                                if _r_cn.status_code != 200:
-                                    continue
-                                _body = _r_cn.json() if _r_cn.text else {}
-                                # Priorite 1 : chercher company_name directement
-                                _dv = _body.get("data") if isinstance(_body, dict) else None
-                                _obj = None
-                                if isinstance(_dv, list) and _dv: _obj = _dv[0]
-                                elif isinstance(_dv, dict): _obj = _dv
-                                elif isinstance(_body, dict): _obj = _body
-
-                                if isinstance(_obj, dict):
-                                    _n = _obj.get("company_name") or _obj.get("companyName")
-                                    if _n:
-                                        _co_name = _n; _name_found = True
-                                        _real_cid = _obj.get("companyid") or _obj.get("id")
-                                        if _real_cid: cid = _real_cid
-                                        break
-                                # Priorite 2 : scan recursif
-                                _n = _find_name_recursive(_body)
-                                if _n:
-                                    _co_name = _n; _name_found = True; break
-                            except Exception as _ex:
-                                _name_debug.append({"url": _url_tpl, "error": str(_ex)[:80]})
-                        # Sauvegarder le debug pour l'utilisateur
-                        st.session_state["_cn_debug"] = _name_debug
-                        # Construire une entree dans companies_list pour permettre les appels scoped
-                        st.session_state.companies_list = [{
-                            "companyid": cid,
-                            "company_name": _co_name,
-                            "name": _co_name,
-                        }]
-                        st.session_state["_key_mode"] = "mono"
-                        st.success(f"🔐 **Cle client (company_users)** — mono-dossier : {_co_name} (ID: {cid})")
-                    else:
-                        st.warning("🔐 **Cle client connectee** mais le companyid n'a pas pu etre detecte automatiquement (l'API Evoliz n'expose pas cette info pour les tokens company_users). **Saisie manuelle requise** :")
-                        st.caption("💡 Trouvez votre companyid dans l'URL Evoliz quand vous etes connecte : `https://xxx.evoliz.com/#/companies/XXXXX/...` -> XXXXX est le companyid.")
-                        with st.expander("🔬 Diagnostic login (debug)", expanded=False):
-                            st.json(login_data)
+                    # GET /companies n'a pas retourne de dossier -> erreur explicite
+                    st.error(f"❌ Impossible de recuperer vos dossiers Evoliz. {_co_error or 'Verifiez vos cles API.'}")
+                    with st.expander("🔬 Diagnostic login", expanded=False):
+                        st.json(login_data)
             elif r_log.status_code == 401:
                 st.error(f"❌ Echec login : HTTP 401 — **credentials invalides**")
                 with st.expander("🔍 Diagnostic", expanded=True):
@@ -796,32 +695,6 @@ with m2:
                 st.error(f"Échec login : HTTP {r_log.status_code} — {r_log.text[:300]}")
         else:
             st.warning("Renseignez la Public Key et la Secret Key pour vous connecter.")
-
-    # --- Bloc 2bis : Saisie manuelle du companyid (fallback pour cles client sans cid auto-detecte) ---
-    if (st.session_state.token_headers_105
-        and not st.session_state.get('company_id_105')
-        and not st.session_state.get('companies_list')
-        and st.session_state.get('_key_mode') == 'mono'):
-        st.divider()
-        st.subheader("🆔 Saisie manuelle du companyid")
-        st.caption("Impossible de detecter automatiquement votre dossier. Saisissez le companyid (identifiant numerique) de votre dossier Evoliz.")
-        _manual_cid = st.number_input("CompanyID", min_value=1, step=1, key="manual_cid", value=None, placeholder="ex: 12345")
-        if st.button("✅ Valider le companyid", key="btn_validate_cid") and _manual_cid:
-            # Verifier que l'ID fonctionne via un GET
-            try:
-                _r_test = requests.get(f"https://www.evoliz.io/api/v1/companies/{int(_manual_cid)}",
-                                        headers=st.session_state.token_headers_105, timeout=10)
-                if _r_test.status_code == 200:
-                    _d = _r_test.json()
-                    _name = (_d.get('data') or _d).get('company_name', f"Dossier {_manual_cid}") if isinstance(_d, dict) else f"Dossier {_manual_cid}"
-                    st.session_state.company_id_105 = int(_manual_cid)
-                    st.session_state.companies_list = [{"companyid": int(_manual_cid), "company_name": _name, "name": _name}]
-                    st.success(f"✅ Dossier valide : {_name} (ID: {_manual_cid})")
-                    st.rerun()
-                else:
-                    st.error(f"Impossible de valider ce companyid (HTTP {_r_test.status_code}). Verifiez le numero.")
-            except Exception as e:
-                st.error(f"Erreur de validation : {e}")
 
     # --- Bloc 2 : Sélecteur de dossier (multi-company) ---
     _companies = st.session_state.get('companies_list', [])
@@ -893,46 +766,6 @@ with m2:
                     except Exception as e:
                         st.error(f"Erreur : {e}")
 
-    # --- Diagnostic API (utile pour debug company_users) ---
-    if _cid and st.session_state.token_headers_105:
-        with st.expander("🔬 Diagnostic API (tester les endpoints)", expanded=False):
-            if st.button("▶️ Tester les endpoints", key="btn_api_diag"):
-                _h_diag = st.session_state.token_headers_105
-                _diag_results = []
-                _test_urls = [
-                    # Endpoints avec prefixe company
-                    f"https://www.evoliz.io/api/v1/companies/{_cid}",
-                    f"https://www.evoliz.io/api/v1/companies/{_cid}/clients?per_page=1",
-                    f"https://www.evoliz.io/api/v1/companies/{_cid}/articles?per_page=1",
-                    f"https://www.evoliz.io/api/v1/companies/{_cid}/accounts?per_page=1",
-                    f"https://www.evoliz.io/api/v1/companies/{_cid}/suppliers?per_page=1",
-                    # Endpoints globaux (sans prefixe)
-                    "https://www.evoliz.io/api/v1/companies",
-                    "https://www.evoliz.io/api/v1/clients?per_page=1",
-                    "https://www.evoliz.io/api/v1/articles?per_page=1",
-                    "https://www.evoliz.io/api/v1/accounts?per_page=1",
-                ]
-                for _url in _test_urls:
-                    try:
-                        _r = requests.get(_url, headers=_h_diag, timeout=8)
-                        _short = _url.replace("https://www.evoliz.io/api/v1/", "")
-                        _excerpt = ""
-                        if _r.status_code == 200:
-                            try:
-                                _j = _r.json()
-                                if isinstance(_j, dict):
-                                    if "data" in _j:
-                                        _excerpt = f"{len(_j.get('data', []))} items" if isinstance(_j['data'], list) else "data object"
-                                    else:
-                                        _excerpt = f"keys: {', '.join(list(_j.keys())[:5])}"
-                            except Exception:
-                                _excerpt = f"body: {_r.text[:60]}"
-                        else:
-                            _excerpt = _r.text[:80]
-                        _diag_results.append({"URL": _short, "Status": _r.status_code, "Detail": _excerpt})
-                    except Exception as e:
-                        _diag_results.append({"URL": _url, "Status": "ERR", "Detail": str(e)[:80]})
-                st.dataframe(pd.DataFrame(_diag_results), use_container_width=True, hide_index=True)
 
     # --- Bloc 3 : Chargement des données ---
     _is_multi = len(st.session_state.get('companies_list', [])) > 1
