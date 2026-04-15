@@ -263,7 +263,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
         return False, str(e)
 
 st.title("🍌 Banana Import Club")
-st.caption("Version **v2026.04.15-auth-v8** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
+st.caption("Version **v2026.04.15-auth-v9** — si cette version ne s'affiche pas, forcer un Reboot sur Streamlit Cloud.")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -654,120 +654,43 @@ with m2:
                         st.error("❌ Aucun dossier accessible avec cette cle.")
                 else:
                     # --- MODE MONO (company_users) ---
+                    # L'API Evoliz ne permet PAS aux company_users de recuperer leur company_name :
+                    # /companies requiert prescriber_users, /companies/{cid} renvoie 403 meme
+                    # avec le vrai cid. Les ressources scopees (/clients, /articles, ...) fonctionnent
+                    # mais n'exposent pas le companyid dans leurs reponses.
+                    # -> On se passe du cid : les URLs /api/v1/{endpoint} (sans prefixe) fonctionnent
+                    #    nativement pour company_users.
                     cid = None
                     _co_name = None
                     _diag_steps = []
 
-                    # GET /api/v1/companies avec Bearer token -> liste des dossiers accessibles
-                    # Ajout de Content-Type pour etre sur que l'API accepte la requete
-                    _h_full = {
-                        "Authorization": f"Bearer {login_data.get('access_token')}",
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    }
+                    # Decoder JWT pour sub (= user_id, utilise comme placeholder)
                     try:
-                        _r_co = requests.get("https://www.evoliz.io/api/v1/companies",
-                                              headers=_h_full, timeout=15)
-                        _diag_steps.append({
-                            "step": "GET /api/v1/companies (Bearer)",
-                            "status": _r_co.status_code,
-                            "request_headers": {"Authorization": "Bearer <token>", "Accept": "application/json"},
-                            "response_body": _r_co.text[:500],
-                        })
-                        if _r_co.status_code == 200:
-                            _items = _r_co.json().get("data", [])
-                            if _items:
-                                _first = _items[0]
-                                cid = _first.get("companyid") or _first.get("id")
-                                _co_name = _first.get("company_name")
-                    except Exception as _ex:
-                        _diag_steps.append({"step": "GET /api/v1/companies", "error": str(_ex)[:200]})
-
-                    # Si pas de cid -> probe ressources scoped pour extraire le vrai companyid
-                    if not cid:
-                        for _res in ("clients", "articles", "suppliers", "buys", "invoices", "quotes", "payments"):
-                            try:
-                                _r_res = requests.get(f"https://www.evoliz.io/api/v1/{_res}",
-                                                       headers=_h_full, params={"per_page": 1, "page": 1}, timeout=5)
-                                _body_r = _r_res.text[:400]
-                                _diag_steps.append({"step": f"GET /{_res}", "status": _r_res.status_code,
-                                                     "body": _body_r})
-                                if _r_res.status_code == 200:
-                                    _items = _r_res.json().get('data', [])
-                                    if _items:
-                                        _it = _items[0]
-                                        # Chercher companyid dans multiples champs + nested
-                                        _cand = (_it.get('companyid') or _it.get('company_id')
-                                                  or (_it.get('company') or {}).get('companyid')
-                                                  or (_it.get('company') or {}).get('id'))
-                                        if _cand:
-                                            cid = _cand
-                                            _diag_steps.append({"step": f"cid trouve dans {_res}[0]", "cid": cid})
-                                            break
-                            except Exception as _ex:
-                                _diag_steps.append({"step": f"GET /{_res}", "error": str(_ex)[:200]})
-
-                    # Recuperation du nom via endpoints accessibles aux company_users
-                    # (sans prefixe /companies/{cid}/ - l'API resoud automatiquement vers le dossier de l'utilisateur)
-                    _endpoints_for_name = [
-                        "https://www.evoliz.io/api/v1/settings/features",
-                        "https://www.evoliz.io/api/v1/settings/pdf",
-                    ]
-                    if cid:
-                        _endpoints_for_name.insert(0, f"https://www.evoliz.io/api/v1/companies/{cid}")
-                        _endpoints_for_name.append(f"https://www.evoliz.io/api/v1/companies/{cid}/settings/features")
-
-                    for _url in _endpoints_for_name:
-                        if _co_name: break
-                        try:
-                            _r = requests.get(_url, headers=_h_full, timeout=8)
-                            _diag_steps.append({
-                                "step": f"GET {_url.replace('https://www.evoliz.io/api/v1/', '')}",
-                                "status": _r.status_code,
-                                "response_body": _r.text[:400],
-                            })
-                            if _r.status_code == 200:
-                                _body = _r.json()
-                                # Scan recursif pour company_name et companyid
-                                def _scan(obj, depth=0):
-                                    if depth > 5: return (None, None)
-                                    _nm, _ci = None, None
-                                    if isinstance(obj, dict):
-                                        _nm = obj.get("company_name")
-                                        _ci = obj.get("companyid") or obj.get("company_id")
-                                        if not _nm or not _ci:
-                                            for _v in obj.values():
-                                                _sn, _sc = _scan(_v, depth + 1)
-                                                _nm = _nm or _sn
-                                                _ci = _ci or _sc
-                                                if _nm and _ci: break
-                                    elif isinstance(obj, list) and obj:
-                                        return _scan(obj[0], depth + 1)
-                                    return (_nm, _ci)
-                                _nm_found, _ci_found = _scan(_body)
-                                if _nm_found: _co_name = _nm_found
-                                if _ci_found and not cid: cid = _ci_found
-                        except Exception as _ex:
-                            _diag_steps.append({"step": f"GET {_url}", "error": str(_ex)[:200]})
-
-                    st.session_state["_login_diag"] = _diag_steps
+                        import base64 as _b64, json as _jsn
+                        _tok_str = login_data.get("access_token", "")
+                        _parts = _tok_str.split(".")
+                        if len(_parts) >= 2:
+                            _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
+                            _payload = _jsn.loads(_b64.urlsafe_b64decode(_pad))
+                            _sub = _payload.get("sub")
+                            if _sub:
+                                try: cid = int(_sub)
+                                except (TypeError, ValueError): cid = _sub
+                    except Exception:
+                        pass
 
                     if not cid:
-                        st.error("❌ Impossible d'extraire le companyid.")
-                        with st.expander("🔬 Diagnostic", expanded=True):
-                            st.json(_diag_steps)
+                        st.error("❌ Impossible d'extraire le user_id depuis le token.")
                     else:
-                        if not _co_name:
-                            _co_name = f"Dossier {cid}"
-                            st.warning(f"⚠️ Nom du dossier non recuperable via API (tous les endpoints /companies ont echoue). Voir diagnostic.")
-                            with st.expander("🔬 Diagnostic recuperation nom", expanded=True):
-                                st.json(_diag_steps)
+                        _co_name = _co_name or "Mon dossier"
                         st.session_state.company_id_105 = cid
                         st.session_state.companies_list = [{
                             "companyid": cid,
                             "company_name": _co_name,
                             "name": _co_name,
                         }]
+                        # Mode no-prefix : les URLs /api/v1/{endpoint} fonctionnent nativement
+                        st.session_state["_api_no_prefix"] = True
                         st.success(f"🔑 **Cle client (company_users)** — dossier : **{_co_name}** (ID: {cid})")
             elif r_log.status_code == 401:
                 st.error(f"❌ Echec login : HTTP 401 — **credentials invalides**")
@@ -842,12 +765,18 @@ with m2:
         _current = next((c for c in _companies if (c.get('companyid') or c.get('id')) == _cid), None)
         if _current:
             st.info(f"📂 Dossier actif : **{_get_company_label(_current)}** (ID: {_cid})")
-            # Si le nom n'a pas ete trouve, afficher le debug pour diagnostic
-            if _current.get('company_name', '').startswith('Dossier '):
-                _dbg = st.session_state.get("_cn_debug", [])
-                if _dbg:
-                    with st.expander("🔎 Debug : reponses API pour le nom du dossier", expanded=False):
-                        st.json(_dbg)
+            # Saisie manuelle du nom pour company_users (API Evoliz ne l'expose pas)
+            if st.session_state.get("_key_mode") == "mono":
+                _manual_name = st.text_input(
+                    "📝 Nom du dossier (libre, pour affichage)",
+                    value=_current.get('company_name', 'Mon dossier'),
+                    key="manual_co_name",
+                )
+                if _manual_name and _manual_name != _current.get('company_name'):
+                    _current['company_name'] = _manual_name
+                    _current['name'] = _manual_name
+                    st.session_state.companies_list[0]['company_name'] = _manual_name
+                    st.session_state.companies_list[0]['name'] = _manual_name
                 # Bouton manuel pour tester GET /companies/{cid}
                 if st.button(f"🔄 Retenter la recuperation du nom via /companies/{_cid}", key="btn_refetch_name"):
                     try:
