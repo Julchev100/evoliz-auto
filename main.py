@@ -3002,6 +3002,10 @@ if _connected and mod_clients:
         if st.button("🔍 1ère lame — Enrichir via Sirene", type="primary", use_container_width=True, key="btn_sirene"):
             st.session_state["meg_enrichir_flags"] = {}
             df_e = df_preview_c.copy()
+            # Forcer toutes les colonnes en object pour eviter les TypeError dtype lors de l'enrichissement
+            for _col in df_e.columns:
+                if df_e[_col].dtype != "object":
+                    df_e[_col] = df_e[_col].astype("object")
             enriched = skipped = already_complete = not_found_count = 0
             log_rows = []; new_sc = set(sirene_cells); new_si = dict(sirene_info)
             _tasks = []
@@ -3096,11 +3100,15 @@ if _connected and mod_clients:
                 if siren and "TVA intracommunautaire" in df_e.columns:
                     cur = to_clean_str(df_e.at[idx,"TVA intracommunautaire"])
                     if not cur or cur=="NC":
-                        tv = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"; df_e.at[idx,"TVA intracommunautaire"]=tv; new_sc.add((idx,"TVA intracommunautaire")); champs.append(f"TVA={tv}")
+                        tv = f"FR{(12+3*(int(siren)%97))%97:02d}{siren}"
+                        if df_e["TVA intracommunautaire"].dtype != "object": df_e["TVA intracommunautaire"] = df_e["TVA intracommunautaire"].astype("object")
+                        df_e.at[idx,"TVA intracommunautaire"]=tv; new_sc.add((idx,"TVA intracommunautaire")); champs.append(f"TVA={tv}")
                 if not to_clean_str(df_e.at[idx,"Adresse"]) if "Adresse" in df_e.columns else True:
                     pts = [siege.get("numero_voie",""),siege.get("type_voie",""),siege.get("libelle_voie","")]
                     a = " ".join(p for p in pts if p)
-                    if a and "Adresse" in df_e.columns: df_e.at[idx,"Adresse"]=a; new_sc.add((idx,"Adresse")); champs.append(f"Adr={a[:25]}")
+                    if a and "Adresse" in df_e.columns:
+                        if df_e["Adresse"].dtype != "object": df_e["Adresse"] = df_e["Adresse"].astype("object")
+                        df_e.at[idx,"Adresse"]=a; new_sc.add((idx,"Adresse")); champs.append(f"Adr={a[:25]}")
                 _sc("Code postal *",siege.get("code_postal",""),"CP"); _sc("Ville *",siege.get("libelle_commune",""),"Ville")
                 if champs: enriched += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"✅ Enrichi","Trouve":nom_t,"Detail":", ".join(champs)})
                 else: already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":nom_t,"Detail":""})
