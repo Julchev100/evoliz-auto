@@ -1418,6 +1418,7 @@ if _connected and mod_compta:
                                 _added_to_matrice += 1
                 if _added_to_matrice > 0:
                     st.session_state.audit_matrix_105 = _df_m
+                    st.rerun()  # rafraichir immediatement pour que la matrice affiche les nouvelles lignes
 
             if _n_skipped:
                 st.info(f"⏭️ {_n_skipped} élément(s) conserve(s) et reintegre(s) dans la matrice — **{_n_effective}** suppression(s) effectives.")
