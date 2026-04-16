@@ -3037,7 +3037,7 @@ if _connected and mod_clients:
             # Rate limiter partage pour l'API Sirene (max 7 req/s)
             _sirene_lock = threading.Lock()
             _sirene_ts = []
-            _SIRENE_RATE = 6  # 6 req/s (marge sous la limite de 7)
+            _SIRENE_RATE = 4  # 4 req/s (marge large sous la limite de 7)
             def _sirene_wait():
                 with _sirene_lock:
                     now = time.time()
@@ -3058,9 +3058,9 @@ if _connected and mod_clients:
                     _sirene_wait()
                     r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=10)
                     # Backoff progressif sur 429
-                    for _retry in range(3):
+                    for _retry in range(5):
                         if r.status_code != 429: break
-                        time.sleep(2 * (_retry + 1))
+                        time.sleep(3 * (_retry + 1))
                         _sirene_wait()
                         r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=10)
                     return (idx, code, nom, mode, query, r.status_code, r.json() if r.status_code == 200 else None)
@@ -3069,7 +3069,7 @@ if _connected and mod_clients:
 
             progress = st.progress(0, text="1ère lame — Recherche Sirene...")
             _results_list = []
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 futures = {pool.submit(_search_sirene, t): t for t in _tasks}
                 for _n, f in enumerate(as_completed(futures)):
                     _results_list.append(f.result())
@@ -3931,7 +3931,7 @@ if _connected and mod_fournisseurs:
                         with _sirene_lock_f:
                             now = time.time()
                             while _sirene_ts_f and _sirene_ts_f[0] < now - 1.0: _sirene_ts_f.pop(0)
-                            if len(_sirene_ts_f) >= 6:
+                            if len(_sirene_ts_f) >= 4:
                                 wait = _sirene_ts_f[0] + 1.0 - now + 0.05
                                 if wait > 0: time.sleep(wait)
                                 now = time.time()
@@ -3957,7 +3957,7 @@ if _connected and mod_fournisseurs:
                     _pg_bar = st.progress(0.0, text=f"Enrichissement Sirene — 0 / {len(_tasks_f)} (4 workers)")
                     _results_f = []
                     if _tasks_f:
-                        with ThreadPoolExecutor(max_workers=4) as pool:
+                        with ThreadPoolExecutor(max_workers=3) as pool:
                             futures_f = {pool.submit(_search_four, t): t for t in _tasks_f}
                             for _n, fut in enumerate(as_completed(futures_f)):
                                 _results_f.append(fut.result())
@@ -4054,7 +4054,7 @@ if _connected and mod_fournisseurs:
 
                         _all_props_f = []
                         _pg_2 = st.progress(0.0, text=f"Recherche propositions Sirene — 0 / {len(_non_enrichis_f)}")
-                        with ThreadPoolExecutor(max_workers=4) as pool:
+                        with ThreadPoolExecutor(max_workers=3) as pool:
                             futures_2 = {pool.submit(_search_2eme_four, t): t for t in _non_enrichis_f}
                             for _n, fut in enumerate(as_completed(futures_2)):
                                 _all_props_f.append(fut.result())
