@@ -1664,7 +1664,7 @@ with m7:
         if total_all > 0 and st.button("⚡ LANCER LA SYNCHRONISATION", type="primary", use_container_width=True):
             headers = st.session_state.token_headers_105
             cid = st.session_state.company_id_105
-            log = []
+            log = []; _sync_error = None
             progress = st.progress(0)
             done = [0]  # list pour mutation dans les threads
             eraz_counts = {"COMPTE": 0, "ACHAT": 0, "VENTE": 0, "ENTRÉE BQ": 0, "SORTIE BQ": 0}
@@ -1725,6 +1725,11 @@ with m7:
                     _vr = tva_achat_rate
                 return inject_flux(flux_type, code, label, hdrs, vat_id=vat_id, acc_id=acc_id, vat_rate=_vr, company_id=cid)
 
+            # --- SAUVEGARDE INCREMENTALE : le log est enregistre apres chaque etape ---
+            # Si un crash survient, le log partiel est deja en session state.
+            def _save_log():
+                st.session_state.sync_log = log
+
             # --- 1. DELETE orphelins (parallèle par paquets) ---
             if eraz_items:
                 del_tasks = []
@@ -1735,14 +1740,18 @@ with m7:
                     futures = {pool.submit(_del_rate, t[0], t[1]['id'], headers): t for t in del_tasks}
                     for f in as_completed(futures):
                         cat, item = futures[f]
-                        ok, msg = f.result()
+                        try:
+                            ok, msg = f.result()
+                        except Exception as _ex:
+                            ok, msg = False, f"Exception: {_ex}"
                         log.append({"Action": "🗑️ DEL", "Type": cat, "Code": item['Code'],
-                                    "Libellé": item['Libellé'], "Résultat": "✅" if ok else "❌", "Détail": msg})
+                                    "Libellé": item['Libellé'], "Résultat": "✅" if ok else "❌", "Détail": str(msg)[:200]})
                         if ok:
                             eraz_counts[cat] += 1
                         update_progress()
 
             st.session_state.eraz_counts = eraz_counts
+            _save_log()
 
             # --- 1bis. DELETE depuis la matrice (🗑️ selectionne par l'utilisateur) ---
             # Comptes marques 🗑️
@@ -1776,6 +1785,8 @@ with m7:
                                     "Libellé": _label, "Résultat": "❌", "Détail": "ID non trouve dans API"})
                     update_progress()
 
+            _save_log()
+
             # --- 2. UPDATE comptes (DELETE + POST, séquentiel) ---
             patch_accounts = to_sync[to_sync['COMPTE'] == '🔄'] if 'COMPTE' in to_sync.columns else pd.DataFrame()
             for _, row in patch_accounts.iterrows():
@@ -1800,6 +1811,8 @@ with m7:
                 time.sleep(1)
                 st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
 
+            _save_log()
+
             # --- 3. PATCH flux (parallèle) ---
             patch_tasks = []
             acc_lookup = st.session_state.ev_acc_105
@@ -1822,10 +1835,15 @@ with m7:
                     futures = {pool.submit(_patch_rate, t[0], t[2]['id'], t[3], headers, company_id=cid): t for t in patch_tasks}
                     for f in as_completed(futures):
                         flux, code, pinfo, _ = futures[f]
-                        ok, resp = f.result()
+                        try:
+                            ok, resp = f.result()
+                        except Exception as _ex:
+                            ok, resp = False, f"Exception: {_ex}"
                         log.append({"Action": "🔄 UPD", "Type": flux, "Code": code,
                                     "Libellé": pinfo.get('detail', ''), "Résultat": "✅" if ok else "❌", "Détail": str(resp)[:120]})
                         update_progress()
+
+            _save_log()
 
             # --- 4. CREATE comptes (parallèle) ---
             if not new_accounts.empty:
@@ -1834,7 +1852,10 @@ with m7:
                     futures = {pool.submit(_add_account_rate, t[0], t[1], headers): t for t in acc_tasks}
                     for f in as_completed(futures):
                         code, label = futures[f]
-                        ok, resp = f.result()
+                        try:
+                            ok, resp = f.result()
+                        except Exception as _ex:
+                            ok, resp = False, f"Exception: {_ex}"
                         log.append({"Action": "➕ ADD", "Type": "COMPTE", "Code": code,
                                     "Libellé": label, "Résultat": "✅" if ok else "❌", "Détail": str(resp)[:120]})
                         update_progress()
@@ -1843,6 +1864,8 @@ with m7:
             time.sleep(2)  # Pause pour laisser l'API digérer les créations
             with st.spinner("Rafraîchissement des comptes..."):
                 st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
+
+            _save_log()
 
             # --- 5. CREATE flux (parallèle) ---
             flux_tasks = []
@@ -1869,14 +1892,18 @@ with m7:
                     futures = {pool.submit(_add_flux_rate, t[0], t[1], t[2], headers, vat_id=t[3], acc_id=t[4], compte_code=t[5]): t for t in flux_tasks}
                     for f in as_completed(futures):
                         flux, code, lbl, _, _, _ = futures[f]
-                        ok, resp = f.result()
+                        try:
+                            ok, resp = f.result()
+                        except Exception as _ex:
+                            ok, resp = False, f"Exception: {_ex}"
                         log.append({"Action": "➕ ADD", "Type": flux, "Code": code,
                                     "Libellé": lbl, "Résultat": "✅" if ok else "❌", "Détail": str(resp)[:120]})
                         update_progress()
 
             st.session_state.sync_log = log
             ok_count = sum(1 for l in log if l['Résultat'] == '✅')
-            st.success(f"Terminé : {ok_count}/{len(log)} opérations réussies")
+            if log:
+                st.success(f"Terminé : {ok_count}/{len(log)} opérations réussies")
 
             with st.spinner("Rafraîchissement des données API..."):
                 st.session_state.ev_acc_105 = fetch_evoliz_data("accounts", headers, company_id=cid)
