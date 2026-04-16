@@ -3079,6 +3079,9 @@ if _connected and mod_clients:
                 champs = []
                 def _sc(col, val, lbl, _idx=idx):
                     if col in df_e.columns and val and (not to_clean_str(df_e.at[_idx,col]) or to_clean_str(df_e.at[_idx,col])=="NC"):
+                        # Forcer la colonne en object si dtype incompatible (ex: Siren/Siret numeric -> string)
+                        if df_e[col].dtype != "object":
+                            df_e[col] = df_e[col].astype("object")
                         df_e.at[_idx,col]=val; new_sc.add((_idx,col)); champs.append(f"{lbl}={val}")
                 _sc("Siren",siren,"SIREN"); _sc("Siret",siret,"SIRET")
                 if siren and "Type *" in df_e.columns:
