@@ -1177,7 +1177,7 @@ if _connected:
             st.session_state.prot_105 = {"comptes": prot_comptes, "flux": prot_flux, "flux_ids": prot_flux_ids}
             st.success(f"Analyse terminée : {len(results)} lignes traitées, {len(rejets)} rejetées → voir onglets Matrice / Rejetées")
 
-if _connected:
+if _connected and mod_compta:
  with m4:
     # Gate : necessite API + dossier + fichier Balance
     _gate_matrice = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105')) and bool(st.session_state.get('imp_file_balance'))
@@ -2373,7 +2373,7 @@ def _auto_map_columns(src_columns):
     return mapping
 
 # --- Onglet Injection Clients ---
-if _connected:
+if _connected and mod_clients:
  with m_cli:
     _gate_cli = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
     if not _gate_cli:
@@ -3527,7 +3527,7 @@ if _connected:
 
 
 # --- Onglet Injection Fournisseurs ---
-if _connected:
+if _connected and mod_fournisseurs:
  with m_four:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
@@ -4089,7 +4089,7 @@ if _connected:
 
 
 # --- Onglet Bascule Factures ---
-if _connected:
+if _connected and mod_factures:
  with m_fac:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
@@ -4191,7 +4191,7 @@ if _connected:
                 st.download_button("Telecharger le ZIP",data=zb.getvalue(),file_name="Gabarit_Facture_Paiement_Avoir.zip",mime="application/zip",key="dl_meg_fac")
 
 # --- Onglet Bascule Articles ---
-if _connected:
+if _connected and mod_articles:
  with m_art:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
