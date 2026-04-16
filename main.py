@@ -1357,35 +1357,65 @@ if _connected and mod_compta:
             _n_effective = sum(len(v) for v in _filtered_eraz.values())
             _n_skipped = total_orphans - _n_effective
 
-            # --- Reintegrer les orphelins gardes dans la matrice ---
+            # --- Reintegrer les orphelins gardes dans la matrice avec les regles de parametrage ---
             if _n_skipped > 0 and not st.session_state.audit_matrix_105.empty:
                 _df_m = st.session_state.audit_matrix_105
                 _existing_codes = set(_df_m['N°'].astype(str).str.strip())
                 _added_to_matrice = 0
+                _rules_df = st.session_state.nr_v62
+                _sorted_roots = []
+                if not _rules_df.empty and 'Racine' in _rules_df.columns:
+                    _sorted_roots = sorted(
+                        [str(r) for r in _rules_df['Racine'].dropna() if str(r).strip()],
+                        key=len, reverse=True
+                    )
+
                 for cat, items in orphans_by_cat.items():
                     for it in items:
-                        if (cat, it['id']) in st.session_state._skip_delete:
-                            # Cet orphelin est garde -> l'ajouter a la matrice s'il n'y est pas
-                            _code = str(it['Code']).strip()
-                            if _code not in _existing_codes:
-                                _new_row = {
-                                    "Sync": False, "N°": _code, "Libellé": it['Libellé'],
-                                    "LibFlux": it['Libellé'], "TVA": "—", "_vat_id": None,
-                                    "COMPTE": "✅" if cat == "COMPTE" else "—",
-                                    "ACHAT": "✅" if cat == "ACHAT" else "—",
-                                    "VENTE": "✅" if cat == "VENTE" else "—",
-                                    "ENTRÉE BQ": "✅" if cat == "ENTRÉE BQ" else "—",
-                                    "SORTIE BQ": "✅" if cat == "SORTIE BQ" else "—",
-                                }
-                                _df_m = pd.concat([_df_m, pd.DataFrame([_new_row])], ignore_index=True)
-                                _existing_codes.add(_code)
+                        if (cat, it['id']) not in st.session_state._skip_delete:
+                            continue  # pas garde, sera supprime
+                        _code = str(it['Code']).strip()
+                        _label = it['Libellé']
+                        _label_flux = clean_label_tva(_label, _code, fusion_tva) if cat != "COMPTE" else _label
+
+                        if _code not in _existing_codes:
+                            # Chercher la regle de parametrage pour ce code
+                            _match_root = next((r for r in _sorted_roots if _code.startswith(r)), None)
+                            _match_row = None
+                            if _match_root and not _rules_df.empty:
+                                _matches = _rules_df[_rules_df['Racine'].apply(to_clean_str) == _match_root]
+                                if not _matches.empty:
+                                    _match_row = _matches.iloc[0]
+
+                            # Resoudre le statut de chaque categorie selon le parametrage
+                            _new_row = {
+                                "Sync": False, "N°": _code, "Libellé": _label,
+                                "LibFlux": _label_flux, "TVA": "—", "_vat_id": None,
+                                "COMPTE": "✅",  # le compte existe dans Evoliz
+                            }
+                            for _flux in ["ACHAT", "VENTE", "ENTRÉE BQ", "SORTIE BQ"]:
+                                if _match_row is not None and _match_row.get(_flux, False):
+                                    # Le parametrage dit que ce flux doit exister pour ce compte
+                                    # Verifier si le flux existe deja dans Evoliz
+                                    _flux_store = st.session_state.ev_data_105.get(_flux, {})
+                                    _piv = norm_piv(_label_flux)
+                                    _found = any(norm_piv(d.get('label', '')) == _piv or norm_piv(d.get('code', '')) == _piv
+                                                 for d in _flux_store.values())
+                                    _new_row[_flux] = "✅" if _found else "➕"
+                                    if _new_row[_flux] == "➕":
+                                        _new_row["Sync"] = True
+                                else:
+                                    _new_row[_flux] = "—"
+
+                            _df_m = pd.concat([_df_m, pd.DataFrame([_new_row])], ignore_index=True)
+                            _existing_codes.add(_code)
+                            _added_to_matrice += 1
+                        else:
+                            # Le code existe deja -> mettre le statut ✅ pour la categorie de l'orphelin
+                            _idx = _df_m[_df_m['N°'].astype(str).str.strip() == _code].index
+                            if len(_idx) > 0 and _df_m.at[_idx[0], cat] in ("—", ""):
+                                _df_m.at[_idx[0], cat] = "✅"
                                 _added_to_matrice += 1
-                            else:
-                                # Le code existe deja -> juste mettre le statut ✅ pour cette categorie
-                                _idx = _df_m[_df_m['N°'].astype(str).str.strip() == _code].index
-                                if len(_idx) > 0 and _df_m.at[_idx[0], cat] in ("—", ""):
-                                    _df_m.at[_idx[0], cat] = "✅"
-                                    _added_to_matrice += 1
                 if _added_to_matrice > 0:
                     st.session_state.audit_matrix_105 = _df_m
 
