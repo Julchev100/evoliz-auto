@@ -1356,8 +1356,41 @@ if _connected and mod_compta:
 
             _n_effective = sum(len(v) for v in _filtered_eraz.values())
             _n_skipped = total_orphans - _n_effective
+
+            # --- Reintegrer les orphelins gardes dans la matrice ---
+            if _n_skipped > 0 and not st.session_state.audit_matrix_105.empty:
+                _df_m = st.session_state.audit_matrix_105
+                _existing_codes = set(_df_m['N°'].astype(str).str.strip())
+                _added_to_matrice = 0
+                for cat, items in orphans_by_cat.items():
+                    for it in items:
+                        if (cat, it['id']) in st.session_state._skip_delete:
+                            # Cet orphelin est garde -> l'ajouter a la matrice s'il n'y est pas
+                            _code = str(it['Code']).strip()
+                            if _code not in _existing_codes:
+                                _new_row = {
+                                    "Sync": False, "N°": _code, "Libellé": it['Libellé'],
+                                    "LibFlux": it['Libellé'], "TVA": "—", "_vat_id": None,
+                                    "COMPTE": "✅" if cat == "COMPTE" else "—",
+                                    "ACHAT": "✅" if cat == "ACHAT" else "—",
+                                    "VENTE": "✅" if cat == "VENTE" else "—",
+                                    "ENTRÉE BQ": "✅" if cat == "ENTRÉE BQ" else "—",
+                                    "SORTIE BQ": "✅" if cat == "SORTIE BQ" else "—",
+                                }
+                                _df_m = pd.concat([_df_m, pd.DataFrame([_new_row])], ignore_index=True)
+                                _existing_codes.add(_code)
+                                _added_to_matrice += 1
+                            else:
+                                # Le code existe deja -> juste mettre le statut ✅ pour cette categorie
+                                _idx = _df_m[_df_m['N°'].astype(str).str.strip() == _code].index
+                                if len(_idx) > 0 and _df_m.at[_idx[0], cat] in ("—", ""):
+                                    _df_m.at[_idx[0], cat] = "✅"
+                                    _added_to_matrice += 1
+                if _added_to_matrice > 0:
+                    st.session_state.audit_matrix_105 = _df_m
+
             if _n_skipped:
-                st.info(f"⏭️ {_n_skipped} élément(s) exclus — **{_n_effective}** suppression(s) effectives.")
+                st.info(f"⏭️ {_n_skipped} élément(s) conserve(s) et reintegre(s) dans la matrice — **{_n_effective}** suppression(s) effectives.")
             else:
                 st.success(f"✅ {_n_effective} suppression(s) prévues.")
 
