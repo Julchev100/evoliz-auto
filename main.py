@@ -1195,15 +1195,21 @@ if _connected and mod_compta:
 
     with sub_matrice:
         if not st.session_state.audit_matrix_105.empty:
+            _status_options = ["✅", "➕", "🔄", "🗑️", "—"]
             st.session_state.audit_matrix_105 = st.data_editor(
                 st.session_state.audit_matrix_105,
                 use_container_width=True, hide_index=True,
-                disabled=["Sync", "N°", "Libellé", "TVA", "COMPTE", "ACHAT", "VENTE", "ENTRÉE BQ", "SORTIE BQ",
+                disabled=["N°", "Libellé", "TVA",
                            "_vat_id", "_patch_cat", "_patch_id", "_patch_payload", "_patch_detail",
                            "_patch_ACHAT", "_patch_VENTE", "_patch_ENTRÉE BQ", "_patch_SORTIE BQ"],
                 column_config={
                     "Libellé": st.column_config.TextColumn("Libellé Compte", help="Libellé du compte (balance) — non modifiable"),
                     "LibFlux": st.column_config.TextColumn("Libellé Flux", help="Libellé catégorie/affectation — modifiable"),
+                    "COMPTE": st.column_config.SelectboxColumn("COMPTE", options=_status_options, help="✅ existant, ➕ a creer, 🔄 a MAJ, 🗑️ supprimer, — ignorer"),
+                    "ACHAT": st.column_config.SelectboxColumn("ACHAT", options=_status_options, help="✅ existant, ➕ a creer, 🔄 a MAJ, 🗑️ supprimer, — ignorer"),
+                    "VENTE": st.column_config.SelectboxColumn("VENTE", options=_status_options, help="✅ existant, ➕ a creer, 🔄 a MAJ, 🗑️ supprimer, — ignorer"),
+                    "ENTRÉE BQ": st.column_config.SelectboxColumn("ENTRÉE BQ", options=_status_options, help="✅ existant, ➕ a creer, 🔄 a MAJ, 🗑️ supprimer, — ignorer"),
+                    "SORTIE BQ": st.column_config.SelectboxColumn("SORTIE BQ", options=_status_options, help="✅ existant, ➕ a creer, 🔄 a MAJ, 🗑️ supprimer, — ignorer"),
                     "_vat_id": None, "_patch_cat": None, "_patch_id": None,
                     "_patch_payload": None, "_patch_detail": None,
                     "_patch_ACHAT": None, "_patch_VENTE": None,
@@ -1577,12 +1583,16 @@ with m7:
 
         new_accounts = to_sync[to_sync['COMPTE'] == '➕']
         patch_accounts = to_sync[to_sync['COMPTE'] == '🔄']
+        # Suppressions demandees directement dans la matrice (🗑️)
+        del_accounts_matrice = to_sync[to_sync['COMPTE'] == '🗑️']
         if ventes_only:
             new_flux = {f: (to_sync[to_sync[f] == '➕'] if f == "VENTE" else pd.DataFrame()) for f in FLUX_ENDPOINTS}
             patch_flux = {f: (to_sync[to_sync[f] == '🔄'] if f == "VENTE" else pd.DataFrame()) for f in FLUX_ENDPOINTS}
+            del_flux_matrice = {f: (to_sync[to_sync[f] == '🗑️'] if f == "VENTE" else pd.DataFrame()) for f in FLUX_ENDPOINTS}
         else:
             new_flux = {f: to_sync[to_sync[f] == '➕'] for f in FLUX_ENDPOINTS}
             patch_flux = {f: to_sync[to_sync[f] == '🔄'] for f in FLUX_ENDPOINTS}
+            del_flux_matrice = {f: to_sync[to_sync[f] == '🗑️'] for f in FLUX_ENDPOINTS}
 
         # Filtrer les créations désactivées par l'utilisateur dans la Synthèse
         _skip = st.session_state.get("_skip_create", set())
@@ -1606,6 +1616,9 @@ with m7:
                 "ACHAT": [], "ENTRÉE BQ": [], "SORTIE BQ": [],
             }
         total_delete = sum(len(v) for v in eraz_items.values()) if eraz_items else 0
+        # Ajouter les suppressions demandees dans la matrice (🗑️)
+        _del_matrice_count = len(del_accounts_matrice) + sum(len(v) for v in del_flux_matrice.values())
+        total_delete += _del_matrice_count
 
         st.subheader("📋 Résumé des opérations")
         c1, c2, c3, c4 = st.columns(4)
@@ -1697,6 +1710,38 @@ with m7:
                         update_progress()
 
             st.session_state.eraz_counts = eraz_counts
+
+            # --- 1bis. DELETE depuis la matrice (🗑️ selectionne par l'utilisateur) ---
+            # Comptes marques 🗑️
+            for _, row in del_accounts_matrice.iterrows():
+                _code = row['N°']
+                _ev_a = st.session_state.ev_acc_105.get(norm_piv(_code))
+                if _ev_a:
+                    rate_wait()
+                    ok, msg = delete_evoliz_item("COMPTE", _ev_a['id'], headers, company_id=cid)
+                    log.append({"Action": "🗑️ DEL", "Type": "COMPTE", "Code": _code,
+                                "Libellé": row.get('Libellé', ''), "Résultat": "✅" if ok else "❌", "Détail": msg})
+                update_progress()
+            # Flux marques 🗑️
+            for flux, df_del in del_flux_matrice.items():
+                for _, row in df_del.iterrows():
+                    _code = row['N°']
+                    _label = row.get('LibFlux', row.get('Libellé', ''))
+                    _flux_data = st.session_state.ev_data_105.get(flux, {})
+                    # Chercher l'id dans les donnees API
+                    _item_id = None
+                    for _p, _d in _flux_data.items():
+                        if norm_piv(_d.get('label', '')) == norm_piv(_label) or norm_piv(_d.get('code', '')) == norm_piv(_code):
+                            _item_id = _d['id']; break
+                    if _item_id:
+                        rate_wait()
+                        ok, msg = delete_evoliz_item(flux, _item_id, headers, company_id=cid)
+                        log.append({"Action": "🗑️ DEL", "Type": flux, "Code": _code,
+                                    "Libellé": _label, "Résultat": "✅" if ok else "❌", "Détail": msg})
+                    else:
+                        log.append({"Action": "🗑️ DEL", "Type": flux, "Code": _code,
+                                    "Libellé": _label, "Résultat": "❌", "Détail": "ID non trouve dans API"})
+                    update_progress()
 
             # --- 2. UPDATE comptes (DELETE + POST, séquentiel) ---
             patch_accounts = to_sync[to_sync['COMPTE'] == '🔄'] if 'COMPTE' in to_sync.columns else pd.DataFrame()
