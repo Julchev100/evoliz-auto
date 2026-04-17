@@ -466,10 +466,42 @@ if _access_label:
     st.caption(f"🔑 Acces : **{_access_label}**")
 else:
     st.caption("Version **v2026.04.17**")
+with st.expander("🛡️ Confidentialite et securite des donnees", expanded=False):
+    st.markdown("""
+**Aucune donnee metier n'est conservee** entre les sessions :
+- Les **cles API** (Public Key / Secret Key) sont effacees de la memoire des que le token d'acces est obtenu
+- Les **fichiers importes** (Balance, Clients, Fournisseurs, Articles, Factures PDF) restent uniquement en memoire RAM pendant la session
+- Les **donnees lues via l'API Evoliz** (comptes, classifications, clients, articles) restent en memoire RAM pendant la session
+- **Aucune base de donnees** n'est utilisee — aucun log serveur ne contient de donnees metier
+
+**A la fermeture ou au rafraichissement** de la page, toutes ces donnees sont **definitivement perdues**.
+
+**Seuls sont stockes** (fichier local ou GitHub Gist prive si configure) :
+- Les tokens d'acces tiers (identifiants de session, pas de donnees metier)
+- Le hash du mot de passe administrateur (SHA256, irreversible)
+- Les parametres comptables (racines de comptes, pas de donnees client)
+
+**Sur Streamlit Cloud** : le serveur est un conteneur ephemere isole. Les donnees en RAM sont inaccessibles aux autres utilisateurs.
+""")
+
 
 # Pour les tiers (token URL) : tant que pas connecte API, on affiche UNIQUEMENT le formulaire de connexion
 _is_tiers = bool(_url_token) and not _is_admin
 _tiers_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+
+# --- Timeout d'inactivite : reboot apres 30 minutes sans interaction ---
+_INACTIVITY_TIMEOUT = 30 * 60  # 30 minutes en secondes
+_now = time.time()
+if "last_activity" not in st.session_state:
+    st.session_state.last_activity = _now
+_elapsed = _now - st.session_state.last_activity
+if _elapsed > _INACTIVITY_TIMEOUT:
+    # Session expiree : vider toute la session
+    for _k in list(st.session_state.keys()):
+        del st.session_state[_k]
+    st.warning("⏱️ **Session expiree** (30 minutes d'inactivite). Veuillez vous reconnecter.")
+    st.stop()
+st.session_state.last_activity = _now
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
