@@ -3017,19 +3017,23 @@ if _connected and mod_clients:
                 st.session_state["meg_df_clients"] = df_preview_c
                 st.info(f"💾 {len(_siren_pending)} SIREN saisi(s) — cliquez « 🔍 Enrichissement 2ème lame » ci-dessous pour compléter les données.")
 
-        # --- CR enrichissement ---
+        # --- CR enrichissement synthetique ---
         if st.session_state.get("meg_sirene_stats"):
             stats = st.session_state["meg_sirene_stats"]
-            _total_recherches = stats["enriched"] + stats["already_complete"] + stats["not_found"]
-            _pct_found = round(100 * (stats["enriched"] + stats["already_complete"]) / _total_recherches, 1) if _total_recherches else 0
+            _total_clients = len(df_show) if 'df_show' in dir() else stats["enriched"] + stats["already_complete"] + stats["not_found"] + stats["skipped"]
+            _a_completer = stats["enriched"] + stats["not_found"]  # ceux qui n'etaient pas complets
+            _complets = stats["already_complete"] + stats["enriched"]  # complets apres enrichissement
+            _incomplets = stats["not_found"]
+            _pct_complets = round(100 * _complets / max(_total_clients - stats["skipped"], 1), 1)
+            _pct_enrichis = round(100 * stats["enriched"] / max(_a_completer, 1), 1)
             st.divider()
-            st.subheader(f"📋 Enrichissement Sirene — {_pct_found}% identifiés")
+            st.subheader(f"📋 Enrichissement 1ère lame — {_pct_complets}% complets")
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("✅ Enrichis", stats["enriched"])
-            c2.metric("🟰 Déjà complets", stats["already_complete"])
-            c3.metric("🔍 Non trouvés", stats["not_found"])
-            c4.metric("⏭️ Ignorés", stats["skipped"])
-            c5.metric("📊 % trouvés", f"{_pct_found}%")
+            c1.metric("👥 Clients totaux", _total_clients)
+            c2.metric("🔍 A compléter", _a_completer, help="Clients qui n'etaient pas complets avant enrichissement")
+            c3.metric("✅ Enrichis", stats["enriched"], delta=f"{_pct_enrichis}%", help="Clients completes via Sirene")
+            c4.metric("🟰 Complets", _complets, delta=f"{_pct_complets}%", help="Enrichis + deja complets")
+            c5.metric("❌ Incomplets", _incomplets, help="Non trouves ou pas de match Sirene")
             with st.expander("📋 Détail ligne par ligne", expanded=False):
                 lr = st.session_state.get("meg_sirene_log", [])
                 if lr:
