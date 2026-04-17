@@ -3069,11 +3069,20 @@ if _connected and mod_clients:
                 _type_mapped = "Type" in st.session_state.get("meg_col_mapping_final", {})
                 if _type_mapped and type_c == "Particulier":
                     skipped += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"⏭️ Part. (fichier)","Trouve":"","Detail":""}); continue
-                _has_siren = bool(to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else "")
-                _has_siret = bool(to_clean_str(df_e.at[idx, "Siret"]) if "Siret" in df_e.columns else "")
-                _has_cp = bool(to_clean_str(df_e.at[idx, "Code postal *"]) not in ("", "NC") if "Code postal *" in df_e.columns else False)
-                _has_ville = bool(to_clean_str(df_e.at[idx, "Ville *"]) not in ("", "NC") if "Ville *" in df_e.columns else False)
-                if _has_siren and _has_siret and _has_cp and _has_ville:
+                def _has_val(col):
+                    if col not in df_e.columns: return False
+                    v = to_clean_str(df_e.at[idx, col])
+                    return bool(v) and v not in ("NC", "N/C", "nan")
+                # Complet = champs obligatoires API + Siren + TVA IC
+                _is_complete = all([
+                    _has_val("Societe / Nom *"),   # nom
+                    _has_val("Code *"),             # code
+                    _has_val("Code postal *"),      # CP
+                    _has_val("Ville *"),            # ville
+                    _has_val("Siren"),              # SIREN
+                    _has_val("TVA intracommunautaire"),  # TVA IC
+                ])
+                if _is_complete:
                     already_complete += 1; log_rows.append({"Client":code,"Nom":nom,"Statut":"🟰 Complet","Trouve":"","Detail":""}); continue
                 _existing_siren = to_clean_str(df_e.at[idx, "Siren"]) if "Siren" in df_e.columns else ""
                 if _existing_siren and len(_existing_siren) >= 9 and _existing_siren.isdigit():
