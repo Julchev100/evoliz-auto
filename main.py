@@ -403,44 +403,57 @@ with st.sidebar:
                     st.success("🔓 Admin deverrouille")
                     st.divider()
 
-                    # --- Liste des tokens ---
-                    _tokens = _access_data.get("tokens", {})
-                    st.markdown(f"**{len(_tokens)} acces configures**")
-                    for _tk, _info in sorted(_tokens.items(), key=lambda x: x[1].get("label", "")):
-                        _status = _info.get("status", "active")
-                        _icon = {"active": "🟢", "suspended": "🟡"}.get(_status, "🔴")
-                        _cols = st.columns([3, 1, 1])
-                        _cols[0].caption(f"{_icon} **{_info.get('label', '?')}** — `...{_tk[-8:]}`")
-                        if _status == "active":
-                            if _cols[1].button("⏸️", key=f"suspend_{_tk}", help="Suspendre"):
-                                _access_data["tokens"][_tk]["status"] = "suspended"
-                                _save_access(_access_data); st.rerun()
-                        else:
-                            if _cols[1].button("▶️", key=f"activate_{_tk}", help="Reactiver"):
-                                _access_data["tokens"][_tk]["status"] = "active"
-                                _save_access(_access_data); st.rerun()
-                        if _cols[2].button("🗑️", key=f"revoke_{_tk}", help="Revoquer"):
-                            del _access_data["tokens"][_tk]
-                            _save_access(_access_data); st.rerun()
-
-                    st.divider()
-                    # --- URL de base de l'app (configurable une seule fois) ---
+                    # --- URL de base (a configurer une fois) ---
                     _saved_base_url = _access_data.get("base_url", "")
-                    _base_url = st.text_input("🌐 URL de base de l'app", value=_saved_base_url,
+                    _base_url = st.text_input("🌐 URL de base", value=_saved_base_url,
                                                placeholder="https://votre-app.streamlit.app",
                                                key="admin_base_url",
-                                               help="Saisissez l'URL une seule fois. Elle sera reutilisee pour tous les tokens.")
+                                               help="URL de l'app. Saisie une fois, reutilisee pour tous les liens.")
                     if _base_url != _saved_base_url:
                         _access_data["base_url"] = _base_url.rstrip("/")
                         _save_access(_access_data)
+                    _base = _access_data.get("base_url", "").rstrip("/")
 
                     st.divider()
+
+                    # --- Liste des acces avec actions ---
+                    _tokens = _access_data.get("tokens", {})
+                    st.markdown(f"**📋 {len(_tokens)} acces**")
+                    if not _tokens:
+                        st.caption("Aucun acces cree.")
+                    for _tk, _info in sorted(_tokens.items(), key=lambda x: x[1].get("label", "")):
+                        _status = _info.get("status", "active")
+                        _icon = {"active": "🟢", "suspended": "🟡"}.get(_status, "🔴")
+                        _lbl = _info.get("label", "?")
+                        _created = _info.get("created", "")
+                        _has_keys = "🔑" if _info.get("pk") else ""
+
+                        st.markdown(f"{_icon} **{_lbl}** {_has_keys}")
+                        if _base:
+                            _url = f"{_base}/?token={_tk}"
+                            st.code(_url, language=None)
+                        st.caption(f"Cree le {_created} — Token: `...{_tk[-8:]}`")
+
+                        _c1, _c2, _c3 = st.columns(3)
+                        if _status == "active":
+                            if _c1.button("⏸️ Suspendre", key=f"suspend_{_tk}", use_container_width=True):
+                                _access_data["tokens"][_tk]["status"] = "suspended"
+                                _save_access(_access_data); st.rerun()
+                        else:
+                            if _c1.button("▶️ Reactiver", key=f"activate_{_tk}", use_container_width=True):
+                                _access_data["tokens"][_tk]["status"] = "active"
+                                _save_access(_access_data); st.rerun()
+                        if _c2.button("🗑️ Revoquer", key=f"revoke_{_tk}", use_container_width=True):
+                            del _access_data["tokens"][_tk]
+                            _save_access(_access_data); st.rerun()
+                        st.divider()
+
                     # --- Creer un nouvel acces ---
                     st.markdown("**➕ Nouvel acces**")
                     _new_label = st.text_input("Nom du tiers", key="new_access_label", placeholder="Ex: Cabinet XYZ")
-                    _new_pk = st.text_input("Public Key associee (optionnel)", key="new_access_pk")
-                    _new_sk = st.text_input("Secret Key associee (optionnel)", type="password", key="new_access_sk")
-                    if st.button("Generer l'acces", key="btn_gen_access") and _new_label:
+                    _new_pk = st.text_input("Public Key (optionnel)", key="new_access_pk")
+                    _new_sk = st.text_input("Secret Key (optionnel)", type="password", key="new_access_sk")
+                    if st.button("✅ Creer l'acces", key="btn_gen_access", type="primary", use_container_width=True) and _new_label:
                         _new_token = secrets.token_urlsafe(24)
                         _access_data.setdefault("tokens", {})[_new_token] = {
                             "label": _new_label,
@@ -451,16 +464,6 @@ with st.sidebar:
                         }
                         _save_access(_access_data)
                         st.rerun()
-
-                    # --- URLs des acces actifs (copiables) ---
-                    _base = _access_data.get("base_url", "").rstrip("/")
-                    if _base and _tokens:
-                        st.divider()
-                        st.markdown("**🔗 URLs a partager**")
-                        for _tk, _info in sorted(_tokens.items(), key=lambda x: x[1].get("label", "")):
-                            if _info.get("status") == "active":
-                                _url = f"{_base}/?token={_tk}"
-                                st.code(f"{_info.get('label', '?')} → {_url}", language=None)
 
                     st.divider()
                     # --- Changer le mot de passe admin ---
