@@ -435,14 +435,31 @@ if _url_token:
         st.stop()
     else:
         st.error("⛔ **Token invalide ou revoque.**")
-        with st.expander("Debug", expanded=False):
-            st.text(f"Token recu: [{_url_token}] (len={len(_url_token)})")
-            st.text(f"Tokens connus: {list(_access_data.get('tokens', {}).keys())}")
         st.stop()
 else:
-    # Pas de token -> acces libre (admin ou premier usage)
-    _access_granted = True
-    _is_admin = True
+    # Pas de token -> acces admin protege par mot de passe
+    _admin_hash = _access_data.get("admin_hash", "")
+    if not _admin_hash:
+        # Premier usage : pas de mot de passe defini -> acces libre pour le configurer
+        _access_granted = True
+        _is_admin = True
+    else:
+        # Mot de passe admin requis
+        if st.session_state.get("_admin_auth"):
+            _access_granted = True
+            _is_admin = True
+        else:
+            st.title("🍌 Banana Import Club")
+            st.subheader("🔒 Acces administrateur")
+            st.caption("Cette application est protegee. Saisissez le mot de passe administrateur.")
+            _pw = st.text_input("Mot de passe", type="password", key="admin_gate_pw")
+            if st.button("🔓 Acceder", type="primary", use_container_width=True, key="btn_admin_gate"):
+                if _hash_pw(_pw) == _admin_hash:
+                    st.session_state["_admin_auth"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Mot de passe incorrect.")
+            st.stop()
 
 st.title("🍌 Banana Import Club")
 if _access_label:
