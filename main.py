@@ -1172,7 +1172,10 @@ if _connected:
                     seen_pivots.add(pivot_flux)
                 results.append(item)
 
-            st.session_state.audit_matrix_105 = pd.DataFrame(results)
+            _df_results = pd.DataFrame(results)
+            if not _df_results.empty and 'N°' in _df_results.columns:
+                _df_results = _df_results.sort_values("N°", key=lambda s: s.astype(str).str.zfill(10)).reset_index(drop=True)
+            st.session_state.audit_matrix_105 = _df_results
             st.session_state.rejets_105 = pd.DataFrame(rejets)
             st.session_state.prot_105 = {"comptes": prot_comptes, "flux": prot_flux, "flux_ids": prot_flux_ids}
             st.success(f"Analyse terminée : {len(results)} lignes traitées, {len(rejets)} rejetées → voir onglets Matrice / Rejetées")
@@ -1358,6 +1361,12 @@ if _connected and mod_compta:
             _n_skipped = total_orphans - _n_effective
 
             # --- Reintegrer les orphelins gardes dans la matrice avec les regles de parametrage ---
+            # Debug : afficher les orphelins gardes
+            _kept_items = [(cat, it) for cat, items in orphans_by_cat.items() for it in items
+                           if (cat, it['id']) in st.session_state._skip_delete]
+            if _kept_items:
+                st.caption(f"🔄 {len(_kept_items)} orphelin(s) garde(s) a reintegrer : " +
+                           ", ".join(f"{cat}:{it['Code']}" for cat, it in _kept_items[:10]))
             if _n_skipped > 0 and not st.session_state.audit_matrix_105.empty:
                 _df_m = st.session_state.audit_matrix_105
                 _existing_codes = set(_df_m['N°'].astype(str).str.strip())
@@ -1417,8 +1426,13 @@ if _connected and mod_compta:
                                 _df_m.at[_idx[0], cat] = "✅"
                                 _added_to_matrice += 1
                 if _added_to_matrice > 0:
+                    # Trier par N° de compte pour que les lignes reintegrees soient a leur place
+                    _df_m = _df_m.sort_values("N°", key=lambda s: s.astype(str).str.zfill(10)).reset_index(drop=True)
                     st.session_state.audit_matrix_105 = _df_m
-                    st.rerun()  # rafraichir immediatement pour que la matrice affiche les nouvelles lignes
+                    st.success(f"✅ {_added_to_matrice} ligne(s) reintegree(s) dans la matrice.")
+                    st.rerun()
+                elif _n_skipped > 0:
+                    st.caption(f"ℹ️ {_n_skipped} orphelin(s) garde(s) — deja presents dans la matrice.")
 
             if _n_skipped:
                 st.info(f"⏭️ {_n_skipped} élément(s) conserve(s) et reintegre(s) dans la matrice — **{_n_effective}** suppression(s) effectives.")
