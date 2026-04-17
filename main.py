@@ -3275,6 +3275,10 @@ if _connected and mod_clients:
                 if _accepted:
                     if st.button(f"✅ Appliquer {len(_accepted)} sélection(s)", type="primary", use_container_width=True, key="btn_apply_2eme"):
                         df_e = df_preview_c.copy()
+                        # Forcer object pour eviter TypeError dtype lors de l'ecriture
+                        for _col in df_e.columns:
+                            if df_e[_col].dtype != "object":
+                                df_e[_col] = df_e[_col].astype("object")
                         new_sc = set(sirene_cells); new_si = dict(sirene_info)
                         for idx, prop in _accepted:
                             ent = prop["_raw"]; siege = ent.get("siege", {})
@@ -3335,6 +3339,8 @@ if _connected and mod_clients:
             st.caption("SIREN saisis manuellement et non encore enrichis.")
             if st.button(f"🔍 Enrichir les {len(_siren_a_traiter)} SIREN", type="primary", use_container_width=True, key="btn_sirene_3eme"):
                 df_e = df_preview_c.copy()
+                for _col in df_e.columns:
+                    if df_e[_col].dtype != "object": df_e[_col] = df_e[_col].astype("object")
                 new_sc = set(sirene_cells); new_si = dict(sirene_info)
                 _ok = _ko = 0
                 progress = st.progress(0, text="Enrichissement 2ème lame...")
