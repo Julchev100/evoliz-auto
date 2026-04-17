@@ -424,6 +424,17 @@ with st.sidebar:
                             _save_access(_access_data); st.rerun()
 
                     st.divider()
+                    # --- URL de base de l'app (configurable une seule fois) ---
+                    _saved_base_url = _access_data.get("base_url", "")
+                    _base_url = st.text_input("🌐 URL de base de l'app", value=_saved_base_url,
+                                               placeholder="https://votre-app.streamlit.app",
+                                               key="admin_base_url",
+                                               help="Saisissez l'URL une seule fois. Elle sera reutilisee pour tous les tokens.")
+                    if _base_url != _saved_base_url:
+                        _access_data["base_url"] = _base_url.rstrip("/")
+                        _save_access(_access_data)
+
+                    st.divider()
                     # --- Creer un nouvel acces ---
                     st.markdown("**➕ Nouvel acces**")
                     _new_label = st.text_input("Nom du tiers", key="new_access_label", placeholder="Ex: Cabinet XYZ")
@@ -439,16 +450,17 @@ with st.sidebar:
                             "sk": _new_sk or "",
                         }
                         _save_access(_access_data)
-                        st.success(f"✅ Acces cree pour **{_new_label}**")
-                        st.markdown(f"**Token** : `{_new_token}`")
-                        st.caption("Ajoutez `?token=TOKEN` a l'URL de l'app pour donner acces au tiers.")
-                        # Afficher un champ editable avec l'URL a personnaliser
-                        _app_url = st.text_input("URL de base de l'app", value=st.session_state.get("_app_base_url", "http://localhost:8501"), key=f"base_url_{_new_token}")
-                        st.session_state["_app_base_url"] = _app_url
-                        _sep = "&" if "?" in _app_url else "?"
-                        _full_url = f"{_app_url}{_sep}token={_new_token}"
-                        st.code(_full_url, language=None)
-                        st.caption("Copiez cette URL et partagez-la au tiers.")
+                        st.rerun()
+
+                    # --- URLs des acces actifs (copiables) ---
+                    _base = _access_data.get("base_url", "").rstrip("/")
+                    if _base and _tokens:
+                        st.divider()
+                        st.markdown("**🔗 URLs a partager**")
+                        for _tk, _info in sorted(_tokens.items(), key=lambda x: x[1].get("label", "")):
+                            if _info.get("status") == "active":
+                                _url = f"{_base}/?token={_tk}"
+                                st.code(f"{_info.get('label', '?')} → {_url}", language=None)
 
                     st.divider()
                     # --- Changer le mot de passe admin ---
