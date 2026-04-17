@@ -508,8 +508,10 @@ with st.sidebar:
                         st.markdown(f"{_icon} **{_lbl}** {_has_keys}")
                         if _base:
                             _url = f"{_base}/?token={_tk}"
-                            st.code(_url, language=None)
-                        st.caption(f"Cree le {_created} — Token: `...{_tk[-8:]}`")
+                        else:
+                            _url = f"⚠️ Renseignez l'URL de base → ?token={_tk}"
+                        st.text_input(f"URL {_lbl}", value=_url, key=f"url_copy_{_tk}", disabled=True, label_visibility="collapsed")
+                        st.caption(f"Cree le {_created}")
 
                         _c1, _c2, _c3 = st.columns(3)
                         if _status == "active":
