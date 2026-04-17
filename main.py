@@ -486,10 +486,10 @@ with st.sidebar:
                                                placeholder="https://votre-app.streamlit.app",
                                                key="admin_base_url",
                                                help="URL de l'app. Saisie une fois, reutilisee pour tous les liens.")
-                    if _base_url != _saved_base_url:
+                    if _base_url != _saved_base_url and _base_url:
                         _access_data["base_url"] = _base_url.rstrip("/")
                         _save_access(_access_data)
-                    _base = _access_data.get("base_url", "").rstrip("/")
+                    _base = _base_url.rstrip("/") if _base_url else ""
 
                     st.divider()
 
