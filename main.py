@@ -345,9 +345,13 @@ else:
 
 st.title("🍌 Banana Import Club")
 if _access_label:
-    st.caption(f"🔑 Acces tiers : **{_access_label}**")
+    st.caption(f"🔑 Acces : **{_access_label}**")
 else:
     st.caption("Version **v2026.04.17**")
+
+# Pour les tiers (token URL) : tant que pas connecte API, on affiche UNIQUEMENT le formulaire de connexion
+_is_tiers = bool(_url_token) and not _is_admin
+_tiers_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -373,6 +377,79 @@ def load_param_local():
     return pd.DataFrame()
 
 # --- Configuration du perimetre ---
+# Pour les tiers non connectes : pas de sidebar du tout
+if _is_tiers and not _tiers_connected:
+    # Afficher uniquement le formulaire de connexion API (pas de sidebar, pas de tabs)
+    st.subheader("🔑 Connexion Evoliz")
+    st.caption("Saisissez vos cles API Evoliz pour acceder a l'application.")
+    st.caption("🛡️ **Securite** : aucune cle API n'est sauvegardee. Les cles sont effacees de la memoire des que le token est obtenu.")
+    saved_pk, saved_sk = "", ""
+    # Si cles associees au token -> pre-remplir
+    _tok_info_t = _load_access().get("tokens", {}).get(_url_token, {})
+    if _tok_info_t.get("pk"):
+        saved_pk = _tok_info_t["pk"]
+    if _tok_info_t.get("sk"):
+        saved_sk = _tok_info_t["sk"]
+    col_pk, col_sk = st.columns(2)
+    pk_105 = col_pk.text_input("Public Key", value=saved_pk, key="pk_105_tiers")
+    sk_105 = col_sk.text_input("Secret Key", type="password", value=saved_sk, key="sk_105_tiers")
+    if st.button("🔗 CONNECTER", type="primary", use_container_width=True, key="btn_connect_tiers"):
+        if pk_105 and sk_105:
+            with st.spinner("Connexion..."):
+                try:
+                    r_log = requests.post("https://www.evoliz.io/api/login",
+                                          json={"public_key": pk_105, "secret_key": sk_105}, timeout=15)
+                except Exception as e:
+                    st.error(f"Erreur : {e}"); st.stop()
+            if r_log.status_code == 200:
+                login_data = r_log.json()
+                h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
+                st.session_state.token_headers_105 = h
+                # Effacer les cles de la memoire
+                pk_105 = ""; sk_105 = ""
+                # Detecter cid (meme logique que le login principal)
+                _scopes = login_data.get("scopes", []) or []
+                _is_multi_t = "prescriber_users" in _scopes
+                st.session_state["_key_mode"] = "multi" if _is_multi_t else "mono"
+                _companies_t = []
+                try:
+                    r_co = requests.get("https://www.evoliz.io/api/v1/companies", headers=h,
+                                         params={"per_page": 100, "page": 1}, timeout=15)
+                    if r_co.status_code == 200:
+                        _companies_t = r_co.json().get("data", [])
+                except Exception:
+                    pass
+                if _companies_t:
+                    _c0 = _companies_t[0]
+                    for _c in _companies_t:
+                        if "name" not in _c:
+                            _c["name"] = _c.get("company_name") or f"Dossier {_c.get('companyid', '?')}"
+                    st.session_state.companies_list = _companies_t
+                    st.session_state.company_id_105 = _c0.get("companyid")
+                else:
+                    # Fallback JWT sub
+                    try:
+                        import base64 as _b64t, json as _jsnt
+                        _tok = login_data.get("access_token", "")
+                        _parts = _tok.split(".")
+                        if len(_parts) >= 2:
+                            _pad = _parts[1] + "=" * (-len(_parts[1]) % 4)
+                            _payload = _jsnt.loads(_b64t.urlsafe_b64decode(_pad))
+                            _sub = _payload.get("sub")
+                            if _sub:
+                                st.session_state.company_id_105 = int(_sub)
+                                st.session_state.companies_list = [{"companyid": int(_sub), "company_name": "Mon dossier", "name": "Mon dossier"}]
+                    except Exception:
+                        pass
+                st.rerun()
+            elif r_log.status_code == 401:
+                st.error("❌ Cles API invalides.")
+            else:
+                st.error(f"Erreur HTTP {r_log.status_code}")
+        else:
+            st.warning("Saisissez la Public Key et la Secret Key.")
+    st.stop()  # Arrete ici : pas de sidebar, pas de tabs
+
 with st.sidebar:
     # --- ADMINISTRATION DES ACCES (en haut de la sidebar) ---
     if _is_admin:
