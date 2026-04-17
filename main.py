@@ -439,14 +439,16 @@ with st.sidebar:
                             "sk": _new_sk or "",
                         }
                         _save_access(_access_data)
-                        # Construire l'URL
-                        _base_url = st.query_params.get("base_url", "")
-                        if not _base_url:
-                            _base_url = "https://votre-app.streamlit.app/"
-                        _full_url = f"{_base_url}?token={_new_token}"
                         st.success(f"✅ Acces cree pour **{_new_label}**")
+                        st.markdown(f"**Token** : `{_new_token}`")
+                        st.caption("Ajoutez `?token=TOKEN` a l'URL de l'app pour donner acces au tiers.")
+                        # Afficher un champ editable avec l'URL a personnaliser
+                        _app_url = st.text_input("URL de base de l'app", value=st.session_state.get("_app_base_url", "http://localhost:8501"), key=f"base_url_{_new_token}")
+                        st.session_state["_app_base_url"] = _app_url
+                        _sep = "&" if "?" in _app_url else "?"
+                        _full_url = f"{_app_url}{_sep}token={_new_token}"
                         st.code(_full_url, language=None)
-                        st.caption("Partagez cette URL au tiers. Elle donne acces a l'application.")
+                        st.caption("Copiez cette URL et partagez-la au tiers.")
 
                     st.divider()
                     # --- Changer le mot de passe admin ---
