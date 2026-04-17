@@ -296,8 +296,58 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
 
     return False, f"HTTP {last_status}: {last_body[:200]}"
 
+# ===========================================================================================
+# CONTROLE D'ACCES PAR TOKEN URL
+# ===========================================================================================
+import hashlib, secrets
+_ACCESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".access_tokens.json")
+
+def _load_access():
+    try:
+        if os.path.exists(_ACCESS_FILE):
+            with open(_ACCESS_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"tokens": {}, "admin_hash": ""}
+
+def _save_access(data):
+    with open(_ACCESS_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def _hash_pw(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+# Lire le token depuis l'URL (?token=xxx)
+_url_params = st.query_params
+_url_token = _url_params.get("token", "")
+_access_data = _load_access()
+_is_admin = False
+_access_granted = False
+_access_label = ""
+
+if _url_token:
+    # Acces via token URL
+    _tok_info = _access_data.get("tokens", {}).get(_url_token)
+    if _tok_info and _tok_info.get("status") == "active":
+        _access_granted = True
+        _access_label = _tok_info.get("label", "Tiers")
+    elif _tok_info and _tok_info.get("status") == "suspended":
+        st.error("⛔ **Acces suspendu.** Contactez l'administrateur.")
+        st.stop()
+    else:
+        st.error("⛔ **Token invalide ou revoque.**")
+        st.stop()
+else:
+    # Pas de token -> acces libre (admin ou premier usage)
+    _access_granted = True
+    _is_admin = True
+
 st.title("🍌 Banana Import Club")
-st.caption("Version **v2026.04.15-auth-v10** — dossier mono OK, import fichier OK meme sans nom.")
+if _access_label:
+    st.caption(f"🔑 Acces tiers : **{_access_label}**")
+else:
+    st.caption("Version **v2026.04.17**")
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
@@ -324,6 +374,90 @@ def load_param_local():
 
 # --- Configuration du perimetre ---
 with st.sidebar:
+    # --- ADMINISTRATION DES ACCES (en haut de la sidebar) ---
+    if _is_admin:
+        with st.expander("🔒 Administration des acces", expanded=False):
+            _access_data = _load_access()
+            # --- Mot de passe admin (initialisation ou verification) ---
+            _admin_hash = _access_data.get("admin_hash", "")
+            if not _admin_hash:
+                st.warning("⚠️ Aucun mot de passe admin defini.")
+                _new_pw = st.text_input("Definir le mot de passe admin", type="password", key="admin_pw_init")
+                if st.button("✅ Enregistrer", key="btn_save_admin_pw") and _new_pw:
+                    _access_data["admin_hash"] = _hash_pw(_new_pw)
+                    _save_access(_access_data)
+                    st.success("Mot de passe admin enregistre.")
+                    st.rerun()
+            else:
+                if "admin_unlocked" not in st.session_state:
+                    st.session_state.admin_unlocked = False
+                if not st.session_state.admin_unlocked:
+                    _pw = st.text_input("🔑 Mot de passe admin", type="password", key="admin_pw_check")
+                    if st.button("Deverrouiller", key="btn_unlock_admin") and _pw:
+                        if _hash_pw(_pw) == _admin_hash:
+                            st.session_state.admin_unlocked = True
+                            st.rerun()
+                        else:
+                            st.error("Mot de passe incorrect.")
+                else:
+                    st.success("🔓 Admin deverrouille")
+                    st.divider()
+
+                    # --- Liste des tokens ---
+                    _tokens = _access_data.get("tokens", {})
+                    st.markdown(f"**{len(_tokens)} acces configures**")
+                    for _tk, _info in sorted(_tokens.items(), key=lambda x: x[1].get("label", "")):
+                        _status = _info.get("status", "active")
+                        _icon = {"active": "🟢", "suspended": "🟡"}.get(_status, "🔴")
+                        _cols = st.columns([3, 1, 1])
+                        _cols[0].caption(f"{_icon} **{_info.get('label', '?')}** — `...{_tk[-8:]}`")
+                        if _status == "active":
+                            if _cols[1].button("⏸️", key=f"suspend_{_tk}", help="Suspendre"):
+                                _access_data["tokens"][_tk]["status"] = "suspended"
+                                _save_access(_access_data); st.rerun()
+                        else:
+                            if _cols[1].button("▶️", key=f"activate_{_tk}", help="Reactiver"):
+                                _access_data["tokens"][_tk]["status"] = "active"
+                                _save_access(_access_data); st.rerun()
+                        if _cols[2].button("🗑️", key=f"revoke_{_tk}", help="Revoquer"):
+                            del _access_data["tokens"][_tk]
+                            _save_access(_access_data); st.rerun()
+
+                    st.divider()
+                    # --- Creer un nouvel acces ---
+                    st.markdown("**➕ Nouvel acces**")
+                    _new_label = st.text_input("Nom du tiers", key="new_access_label", placeholder="Ex: Cabinet XYZ")
+                    _new_pk = st.text_input("Public Key associee (optionnel)", key="new_access_pk")
+                    _new_sk = st.text_input("Secret Key associee (optionnel)", type="password", key="new_access_sk")
+                    if st.button("Generer l'acces", key="btn_gen_access") and _new_label:
+                        _new_token = secrets.token_urlsafe(24)
+                        _access_data.setdefault("tokens", {})[_new_token] = {
+                            "label": _new_label,
+                            "status": "active",
+                            "created": dt_datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "pk": _new_pk or "",
+                            "sk": _new_sk or "",
+                        }
+                        _save_access(_access_data)
+                        # Construire l'URL
+                        _base_url = st.query_params.get("base_url", "")
+                        if not _base_url:
+                            _base_url = "https://votre-app.streamlit.app/"
+                        _full_url = f"{_base_url}?token={_new_token}"
+                        st.success(f"✅ Acces cree pour **{_new_label}**")
+                        st.code(_full_url, language=None)
+                        st.caption("Partagez cette URL au tiers. Elle donne acces a l'application.")
+
+                    st.divider()
+                    # --- Changer le mot de passe admin ---
+                    with st.popover("🔧 Changer le mot de passe"):
+                        _new_pw2 = st.text_input("Nouveau mot de passe", type="password", key="admin_pw_change")
+                        if st.button("Enregistrer", key="btn_change_pw") and _new_pw2:
+                            _access_data["admin_hash"] = _hash_pw(_new_pw2)
+                            _save_access(_access_data)
+                            st.success("Mot de passe modifie.")
+        st.divider()
+
     st.header("⚙️ Perimetre d'integration")
     scope = st.radio("Type de parametrage", ["Parametrage complet", "Ventes seules"], key="scope_mode")
     st.divider()
@@ -575,6 +709,13 @@ with m2:
     # --- Clés API ---
     st.subheader("🔑 Connexion Evoliz")
     saved_pk, saved_sk = load_creds()
+    # Si acces via token URL avec cles API associees -> pre-remplir
+    if _url_token and not saved_pk:
+        _tok_info = _load_access().get("tokens", {}).get(_url_token, {})
+        if _tok_info.get("pk"):
+            saved_pk = _tok_info["pk"]
+        if _tok_info.get("sk"):
+            saved_sk = _tok_info["sk"]
     col_pk, col_sk = st.columns(2)
     st.caption("🔐 L'app detecte automatiquement le type de cle : **client** (company_users — mono-dossier) ou **plateforme** (prescriber_users — multi-dossier).")
     st.caption("🛡️ **Securite** : aucune cle API n'est sauvegardee. Les cles sont effacees de la memoire des que le token est obtenu, et les champs sont vides a chaque rafraichissement.")
