@@ -301,8 +301,101 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
 # ===========================================================================================
 import hashlib, secrets
 _ACCESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".access_tokens.json")
+_GIST_FILENAME = "banana_access_tokens.json"
+
+def _get_gist_token():
+    """Recupere le GitHub PAT depuis st.secrets ou variable d'environnement."""
+    try:
+        return st.secrets.get("GITHUB_GIST_TOKEN", "") or os.environ.get("GITHUB_GIST_TOKEN", "")
+    except Exception:
+        return os.environ.get("GITHUB_GIST_TOKEN", "")
+
+def _get_gist_id():
+    """Recupere le Gist ID stocke en local ou dans st.secrets."""
+    try:
+        _id = st.secrets.get("GITHUB_GIST_ID", "") or os.environ.get("GITHUB_GIST_ID", "")
+        if _id: return _id
+    except Exception:
+        pass
+    # Fallback : lu depuis le fichier local
+    try:
+        if os.path.exists(_ACCESS_FILE):
+            with open(_ACCESS_FILE, "r") as f:
+                return json.load(f).get("_gist_id", "")
+    except Exception:
+        pass
+    return ""
+
+def _load_from_gist():
+    """Charge les tokens depuis un GitHub Gist prive."""
+    _pat = _get_gist_token()
+    _gid = _get_gist_id()
+    if not _pat or not _gid:
+        return None
+    try:
+        r = requests.get(f"https://api.github.com/gists/{_gid}",
+                          headers={"Authorization": f"token {_pat}", "Accept": "application/json"}, timeout=10)
+        if r.status_code == 200:
+            _content = r.json().get("files", {}).get(_GIST_FILENAME, {}).get("content", "{}")
+            return json.loads(_content)
+    except Exception:
+        pass
+    return None
+
+def _save_to_gist(data):
+    """Sauvegarde les tokens dans un GitHub Gist prive. Cree le gist si inexistant."""
+    _pat = _get_gist_token()
+    if not _pat:
+        return False
+    _gid = _get_gist_id()
+    _payload = {"files": {_GIST_FILENAME: {"content": json.dumps(data, indent=2, ensure_ascii=False)}}}
+    try:
+        if _gid:
+            # Mise a jour du gist existant
+            r = requests.patch(f"https://api.github.com/gists/{_gid}",
+                                headers={"Authorization": f"token {_pat}", "Accept": "application/json"},
+                                json=_payload, timeout=10)
+            return r.status_code == 200
+        else:
+            # Creation d'un nouveau gist prive
+            _payload["description"] = "Banana Import Club — Access Tokens"
+            _payload["public"] = False
+            r = requests.post("https://api.github.com/gists",
+                               headers={"Authorization": f"token {_pat}", "Accept": "application/json"},
+                               json=_payload, timeout=10)
+            if r.status_code == 201:
+                _new_id = r.json().get("id", "")
+                if _new_id:
+                    # Sauvegarder le gist ID localement pour le retrouver
+                    data["_gist_id"] = _new_id
+                    try:
+                        with open(_ACCESS_FILE, "w") as f:
+                            json.dump(data, f, indent=2, ensure_ascii=False)
+                    except Exception:
+                        pass
+                    # Re-sauver le gist avec le gist_id inclus
+                    _payload["files"][_GIST_FILENAME]["content"] = json.dumps(data, indent=2, ensure_ascii=False)
+                    requests.patch(f"https://api.github.com/gists/{_new_id}",
+                                    headers={"Authorization": f"token {_pat}", "Accept": "application/json"},
+                                    json=_payload, timeout=10)
+                return True
+    except Exception:
+        pass
+    return False
 
 def _load_access():
+    """Charge les tokens : Gist (prioritaire) puis fichier local (fallback)."""
+    # 1) Gist
+    _data = _load_from_gist()
+    if _data:
+        # Synchroniser le fichier local
+        try:
+            with open(_ACCESS_FILE, "w") as f:
+                json.dump(_data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        return _data
+    # 2) Fichier local
     try:
         if os.path.exists(_ACCESS_FILE):
             with open(_ACCESS_FILE, "r") as f:
@@ -312,8 +405,13 @@ def _load_access():
     return {"tokens": {}, "admin_hash": ""}
 
 def _save_access(data):
-    with open(_ACCESS_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    """Sauvegarde les tokens : fichier local + Gist (si configure)."""
+    try:
+        with open(_ACCESS_FILE, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    _save_to_gist(data)
 
 def _hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
@@ -337,6 +435,9 @@ if _url_token:
         st.stop()
     else:
         st.error("⛔ **Token invalide ou revoque.**")
+        with st.expander("Debug", expanded=False):
+            st.text(f"Token recu: [{_url_token}] (len={len(_url_token)})")
+            st.text(f"Tokens connus: {list(_access_data.get('tokens', {}).keys())}")
         st.stop()
 else:
     # Pas de token -> acces libre (admin ou premier usage)
@@ -543,6 +644,28 @@ with st.sidebar:
                         }
                         _save_access(_access_data)
                         st.rerun()
+
+                    st.divider()
+                    # --- Statut persistance ---
+                    _has_gist = bool(_get_gist_token())
+                    _has_gist_id = bool(_get_gist_id())
+                    if _has_gist and _has_gist_id:
+                        st.caption("💾 Stockage : **GitHub Gist** (persistant)")
+                    elif _has_gist:
+                        st.caption("💾 Stockage : **GitHub Gist** (le gist sera cree au prochain enregistrement)")
+                    else:
+                        st.caption("💾 Stockage : **fichier local** (perdu au redeploi Cloud)")
+                        with st.popover("☁️ Activer la persistance Cloud"):
+                            st.markdown("""
+**1.** Creer un [GitHub Personal Access Token](https://github.com/settings/tokens) avec le scope **`gist`**
+
+**2.** Dans Streamlit Cloud → **Settings → Secrets** :
+```toml
+GITHUB_GIST_TOKEN = "ghp_votre_token_ici"
+```
+
+**3.** Redemarrer l'app — le gist sera cree automatiquement au prochain enregistrement.
+""")
 
                     st.divider()
                     # --- Changer le mot de passe admin ---
