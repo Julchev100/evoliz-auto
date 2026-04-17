@@ -489,19 +489,37 @@ with st.expander("🛡️ Confidentialite et securite des donnees", expanded=Fal
 _is_tiers = bool(_url_token) and not _is_admin
 _tiers_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
 
-# --- Timeout d'inactivite : reboot apres 30 minutes sans interaction ---
-_INACTIVITY_TIMEOUT = 30 * 60  # 30 minutes en secondes
+# --- Timeout d'inactivite : reboot automatique apres 30 minutes ---
+# 1) Cote serveur : detection au prochain clic
+_INACTIVITY_TIMEOUT = 30 * 60  # 30 minutes
 _now = time.time()
 if "last_activity" not in st.session_state:
     st.session_state.last_activity = _now
 _elapsed = _now - st.session_state.last_activity
 if _elapsed > _INACTIVITY_TIMEOUT:
-    # Session expiree : vider toute la session
     for _k in list(st.session_state.keys()):
         del st.session_state[_k]
     st.warning("⏱️ **Session expiree** (30 minutes d'inactivite). Veuillez vous reconnecter.")
     st.stop()
 st.session_state.last_activity = _now
+
+# 2) Cote navigateur : JS qui recharge la page automatiquement apres 30 min sans interaction
+st.markdown("""
+<script>
+(function() {
+    var timeout = 30 * 60 * 1000; // 30 minutes en ms
+    var timer;
+    function resetTimer() {
+        clearTimeout(timer);
+        timer = setTimeout(function() { window.location.reload(); }, timeout);
+    }
+    ['click','keypress','mousemove','touchstart','scroll'].forEach(function(evt) {
+        document.addEventListener(evt, resetTimer, true);
+    });
+    resetTimer();
+})();
+</script>
+""", unsafe_allow_html=True)
 
 for key, default in [('nr_v62', pd.DataFrame()), ('audit_matrix_105', pd.DataFrame()),
                          ('rejets_105', pd.DataFrame()), ('prot_105', set()), ('sync_log', []),
