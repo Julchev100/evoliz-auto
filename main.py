@@ -927,6 +927,30 @@ with m2:
                 cp3.metric("Ventes", count_unique(st.session_state.get("ev_data_105", {}).get("VENTE", {})))
                 cp4.metric("Entrees BQ", count_unique(st.session_state.get("ev_data_105", {}).get("ENTRÉE BQ", {})))
                 cp5.metric("Sorties BQ", count_unique(st.session_state.get("ev_data_105", {}).get("SORTIE BQ", {})))
+            st.divider()
+            if st.button("🔄 Rafraichir les donnees API", key="btn_refresh_api", use_container_width=True):
+                # Vider les donnees pour forcer un rechargement complet
+                st.session_state.ev_acc_105 = {}
+                st.session_state.ev_data_105 = {"ACHAT": {}, "VENTE": {}, "ENTRÉE BQ": {}, "SORTIE BQ": {}}
+                for _k in ("ev_clients_raw", "ev_articles_raw", "ev_invoices_raw"):
+                    st.session_state[_k] = []
+                # Reinitialiser aussi la matrice et les analyses dependantes
+                st.session_state.audit_matrix_105 = pd.DataFrame()
+                st.session_state.rejets_105 = pd.DataFrame()
+                st.session_state.prot_105 = set()
+                st.session_state.eraz_counts = {"COMPTE": 0, "ACHAT": 0, "VENTE": 0, "ENTRÉE BQ": 0, "SORTIE BQ": 0}
+                st.session_state.eraz_items = {}
+                st.session_state.sync_log = []
+                for _k in ("_bal_analysed_id", "_synth_modif", "_skip_delete", "_skip_create",
+                            "_art_consol", "_art_consol_stats", "_art_sale_cl", "_art_consol_id",
+                            "_four_consol", "_four_consol_stats"):
+                    if _k in st.session_state:
+                        _v = st.session_state[_k]
+                        if isinstance(_v, dict): st.session_state[_k] = {}
+                        elif isinstance(_v, list): st.session_state[_k] = []
+                        elif isinstance(_v, set): st.session_state[_k] = set()
+                        else: st.session_state[_k] = None
+                st.rerun()  # relance le chargement auto (_data_empty sera True)
 
 # Le code Balance s'execute dans l'onglet Import fichiers (traitement silencieux)
 if _connected:
