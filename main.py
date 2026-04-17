@@ -3203,15 +3203,27 @@ if _connected and mod_clients:
             st.session_state["meg_editor_ver"] = st.session_state.get("meg_editor_ver",0)+1
             st.rerun()
 
-        # --- 2ème lame : propositions Sirene pour les non trouvés ---
+        # --- 2ème lame : propositions Sirene pour les non trouvés (exclut les complets) ---
+        def _is_client_complete(idx, df):
+            """Verifie si un client a tous les champs requis pour etre considere complet."""
+            def _hv(col):
+                if col not in df.columns: return False
+                v = to_clean_str(df.at[idx, col])
+                return bool(v) and v not in ("NC", "N/C", "nan")
+            return all([_hv("Societe / Nom *"), _hv("Code *"), _hv("Code postal *"),
+                        _hv("Ville *"), _hv("Siren"), _hv("TVA intracommunautaire")])
+
         _non_enrichis = []
         if "Societe / Nom *" in df_preview_c.columns:
             for i in df_preview_c.index:
-                if i not in sirene_info:
-                    _nom = str(df_preview_c.at[i, "Societe / Nom *"]).strip()
-                    _code = to_clean_str(df_preview_c.at[i, "Code *"]) if "Code *" in df_preview_c.columns else ""
-                    if _nom and _nom != "nan":
-                        _non_enrichis.append((i, _nom, _code))
+                if i in sirene_info:
+                    continue  # deja traite par 1ere lame
+                if _is_client_complete(i, df_preview_c):
+                    continue  # deja complet, pas besoin d'enrichir
+                _nom = str(df_preview_c.at[i, "Societe / Nom *"]).strip()
+                _code = to_clean_str(df_preview_c.at[i, "Code *"]) if "Code *" in df_preview_c.columns else ""
+                if _nom and _nom != "nan":
+                    _non_enrichis.append((i, _nom, _code))
         if _non_enrichis:
             st.divider()
             st.subheader(f"🔍 2ème lame — {len(_non_enrichis)} client(s) non identifié(s)")
@@ -3339,6 +3351,8 @@ if _connected and mod_clients:
         _siren_a_traiter = []
         if "Siren" in df_preview_c.columns:
             for i in df_preview_c.index:
+                if _is_client_complete(i, df_preview_c):
+                    continue  # deja complet
                 _s = to_clean_str(df_preview_c.at[i, "Siren"])
                 if _s and len(_s) >= 9 and _s.isdigit() and i not in sirene_info:
                     _siren_a_traiter.append((i, _s))
