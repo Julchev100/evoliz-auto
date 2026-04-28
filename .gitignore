@@ -5,3 +5,6 @@
 __pycache__/
 *.pyc
 .streamlit/
+qualification/
+EvolizBalance.v0.10.xlsm
+.gabarit_client_meg.xlsx

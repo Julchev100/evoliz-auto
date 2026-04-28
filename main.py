@@ -20,6 +20,8 @@ try:
 except ImportError:
     _HAS_PDFPLUMBER = False
 
+import evoliz_offline as eo
+
 st.set_page_config(page_title="Banana Import Club", layout="wide", page_icon="🍌")
 
 # --- FONCTIONS DE NETTOYAGE ---
@@ -430,6 +432,8 @@ if _url_token:
     if _tok_info and _tok_info.get("status") == "active":
         _access_granted = True
         _access_label = _tok_info.get("label", "Tiers")
+        # Mode de l'acces : 'online' (defaut, retro-compat), 'offline', ou 'both'
+        st.session_state["_token_mode"] = _tok_info.get("mode", "online")
     elif _tok_info and _tok_info.get("status") == "suspended":
         st.error("⛔ **Acces suspendu.** Contactez l'administrateur.")
         st.stop()
@@ -489,6 +493,14 @@ with st.expander("🛡️ Confidentialite et securite des donnees", expanded=Fal
 _is_tiers = bool(_url_token) and not _is_admin
 _tiers_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
 
+# --- Mode de l'acces (online/offline/both) ---
+# - online : comportement historique (connexion API obligatoire)
+# - offline : pas d'API, generation de gabarits xlsx uniquement
+# - both : le tiers choisit a l'arrivee. L'admin sans token est always-online par defaut.
+_token_mode = st.session_state.get("_token_mode", "online") if _is_tiers else "both"
+# _offline_mode : True si la session courante est en mode hors-ligne
+_offline_mode = bool(st.session_state.get("_offline_mode", False))
+
 # --- Timeout d'inactivite : reboot automatique apres 30 minutes ---
 # 1) Cote serveur : detection au prochain clic
 _INACTIVITY_TIMEOUT = 30 * 60  # 30 minutes
@@ -545,8 +557,26 @@ def load_param_local():
     return pd.DataFrame()
 
 # --- Configuration du perimetre ---
-# Pour les tiers non connectes : pas de sidebar du tout
-if _is_tiers and not _tiers_connected:
+# 0) Mode 'offline' force par le token : on saute la connexion API
+if _is_tiers and _token_mode == "offline":
+    _offline_mode = True
+    st.session_state["_offline_mode"] = True
+
+# 1) Mode 'both' : ecran de choix au login si non encore choisi
+if _is_tiers and _token_mode == "both" and not _tiers_connected and "_offline_mode" not in st.session_state:
+    st.subheader("Mode d'utilisation")
+    st.caption("Choisissez le mode de cette session.")
+    _c_on, _c_off = st.columns(2)
+    if _c_on.button("🔗 Mode connecte (API Evoliz)", type="primary", use_container_width=True, key="btn_mode_online"):
+        st.session_state["_offline_mode"] = False
+        st.rerun()
+    if _c_off.button("📥 Mode hors-ligne (gabarits xlsx)", type="primary", use_container_width=True, key="btn_mode_offline"):
+        st.session_state["_offline_mode"] = True
+        st.rerun()
+    st.stop()
+
+# 2) Connexion API obligatoire (mode online ou both-online), si tiers et pas connecte
+if _is_tiers and not _tiers_connected and not _offline_mode:
     # Afficher uniquement le formulaire de connexion API (pas de sidebar, pas de tabs)
     st.subheader("🔑 Connexion Evoliz")
     st.caption("Saisissez vos cles API Evoliz pour acceder a l'application.")
@@ -666,20 +696,36 @@ with st.sidebar:
                     st.markdown(f"**📋 {len(_tokens)} acces**")
                     if not _tokens:
                         st.caption("Aucun acces cree.")
+                    _MODE_LABELS = {"online": "🔗 Connecte (API)", "offline": "📥 Hors-ligne", "both": "🔀 Connecte + Hors-ligne"}
+                    _MODE_OPTIONS = list(_MODE_LABELS.keys())
                     for _tk, _info in sorted(_tokens.items(), key=lambda x: x[1].get("label", "")):
                         _status = _info.get("status", "active")
                         _icon = {"active": "🟢", "suspended": "🟡"}.get(_status, "🔴")
                         _lbl = _info.get("label", "?")
                         _created = _info.get("created", "")
                         _has_keys = "🔑" if _info.get("pk") else ""
+                        _tk_mode = _info.get("mode", "online")
 
-                        st.markdown(f"{_icon} **{_lbl}** {_has_keys}")
+                        st.markdown(f"{_icon} **{_lbl}** {_has_keys}  ·  {_MODE_LABELS.get(_tk_mode, _tk_mode)}")
                         if _base:
                             _url = f"{_base}/?token={_tk}"
                         else:
                             _url = f"⚠️ Renseignez l'URL de base → ?token={_tk}"
                         st.text_input(f"URL {_lbl}", value=_url, key=f"url_copy_{_tk}", disabled=True, label_visibility="collapsed")
                         st.caption(f"Cree le {_created}")
+
+                        # --- Edition du mode ---
+                        _new_mode = st.selectbox(
+                            "Mode d'acces", _MODE_OPTIONS,
+                            index=_MODE_OPTIONS.index(_tk_mode) if _tk_mode in _MODE_OPTIONS else 0,
+                            format_func=lambda m: _MODE_LABELS[m],
+                            key=f"mode_sel_{_tk}",
+                            label_visibility="collapsed",
+                        )
+                        if _new_mode != _tk_mode:
+                            _access_data["tokens"][_tk]["mode"] = _new_mode
+                            _save_access(_access_data)
+                            st.rerun()
 
                         _c1, _c2, _c3 = st.columns(3)
                         if _status == "active":
@@ -698,6 +744,14 @@ with st.sidebar:
                     # --- Creer un nouvel acces ---
                     st.markdown("**➕ Nouvel acces**")
                     _new_label = st.text_input("Nom du tiers", key="new_access_label", placeholder="Ex: Cabinet XYZ")
+                    _new_mode_create = st.selectbox(
+                        "Mode d'acces", _MODE_OPTIONS,
+                        format_func=lambda m: _MODE_LABELS[m],
+                        key="new_access_mode",
+                        help="Connecte = API obligatoire (comportement classique). "
+                             "Hors-ligne = generation de gabarits xlsx, sans API. "
+                             "Connecte + Hors-ligne = le tiers choisit a chaque session.",
+                    )
                     _new_pk = st.text_input("Public Key (optionnel)", key="new_access_pk")
                     _new_sk = st.text_input("Secret Key (optionnel)", type="password", key="new_access_sk")
                     if st.button("✅ Creer l'acces", key="btn_gen_access", type="primary", use_container_width=True) and _new_label:
@@ -705,6 +759,7 @@ with st.sidebar:
                         _access_data.setdefault("tokens", {})[_new_token] = {
                             "label": _new_label,
                             "status": "active",
+                            "mode": _new_mode_create,
                             "created": dt_datetime.now().strftime("%Y-%m-%d %H:%M"),
                             "pk": _new_pk or "",
                             "sk": _new_sk or "",
@@ -818,9 +873,14 @@ def load_balance_path():
 # Construction dynamique des onglets - uniquement Connexion API tant qu'aucun dossier n'est connecte
 _tab_names = []
 _tab_keys = []
-_tab_names.append("🔑 Connexion API"); _tab_keys.append("api")
+if _offline_mode:
+    _tab_names.append("📥 Mode hors-ligne"); _tab_keys.append("api")
+else:
+    _tab_names.append("🔑 Connexion API"); _tab_keys.append("api")
 
-_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+_api_connected = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+# _connected : un onglet module peut s'afficher (vrai si connecte API OU mode hors-ligne)
+_connected = _api_connected or _offline_mode
 if _connected:
     _tab_names.append("📁 Import fichiers"); _tab_keys.append("import")
     if mod_compta:
@@ -905,8 +965,8 @@ if _connected:
     st.subheader("📁 Import des fichiers sources")
     st.caption("Centralisez ici tous vos fichiers. Ils seront utilises dans les onglets correspondants.")
 
-    # Gate logique : pas d'import tant qu'aucun dossier Evoliz n'est identifie
-    _gate_import = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+    # Gate logique : pas d'import tant qu'aucun dossier Evoliz n'est identifie (sauf en hors-ligne)
+    _gate_import = (bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))) or _offline_mode
     if not _gate_import:
         st.warning("⛔ **Import bloque** — Connectez-vous a l'API Evoliz puis selectionnez un dossier dans l'onglet **🔑 Connexion API** avant d'importer des fichiers.")
 
@@ -923,7 +983,14 @@ if _connected:
             c1, c2, c3 = st.columns([1.5, 4, 1.5])
         c1.markdown(f"**{label}**")
         _f = c2.file_uploader(label, type=types, key=uploader_key, label_visibility="collapsed")
-        if _f: st.session_state[session_key] = _f; _f_uploaded = _f
+        if _f:
+            _prev_name = getattr(_f_uploaded, "name", None) if _f_uploaded is not None else None
+            _is_new = _prev_name != getattr(_f, "name", None)
+            st.session_state[session_key] = _f; _f_uploaded = _f
+            # Si le fichier vient de changer : relance le script pour recalculer _has_sheets
+            # (sinon le selectbox d'onglet n'apparait qu'a la 2e interaction)
+            if _is_new:
+                st.rerun()
         if _has_sheets:
             _sheet_key = f"_sheet_{session_key}"
             _chosen = c3.selectbox(f"Onglet", _sheets, key=_sheet_key, label_visibility="collapsed")
@@ -991,7 +1058,11 @@ if _f_param_loaded:
     except Exception:
         pass
 
-with m2:
+if _offline_mode:
+    with m2:
+        eo.render_offline_welcome(st, _access_label)
+else:
+ with m2:
     # --- Clés API ---
     st.subheader("🔑 Connexion Evoliz")
     saved_pk, saved_sk = load_creds()
@@ -1380,9 +1451,13 @@ with m2:
                 st.rerun()  # relance le chargement auto (_data_empty sera True)
 
 # Le code Balance s'execute dans l'onglet Import fichiers (traitement silencieux)
-if _connected:
+# En mode hors-ligne : les ev_acc_105 / ev_data_105 sont vides -> tout sera "a creer", aucun MAJ, aucun delete.
+if _api_connected or _offline_mode:
  with m_import:
-  if mod_compta and st.session_state.get('company_id_105') and st.session_state.get('token_headers_105'):
+  if mod_compta and (
+        (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105'))
+        or _offline_mode
+    ):
     f105 = st.session_state.get("imp_file_balance")
     if not f105:
         # Fallback : chemin local
@@ -1631,18 +1706,30 @@ if _connected:
             st.session_state.prot_105 = {"comptes": prot_comptes, "flux": prot_flux, "flux_ids": prot_flux_ids}
             st.success(f"Analyse terminée : {len(results)} lignes traitées, {len(rejets)} rejetées → voir onglets Matrice / Rejetées")
 
-if _connected and mod_compta:
+if (_api_connected or _offline_mode) and mod_compta:
  with m4:
-    # Gate : necessite API + dossier + fichier Balance
-    _gate_matrice = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105')) and bool(st.session_state.get('imp_file_balance'))
-    if not _gate_matrice:
-        if not st.session_state.get('company_id_105'):
-            st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**).")
-        elif not st.session_state.get('imp_file_balance'):
+    # Gate : en hors-ligne, seul le fichier balance est requis. En connecte, API + dossier + balance.
+    if _offline_mode:
+        _gate_matrice = bool(st.session_state.get('imp_file_balance'))
+        if not _gate_matrice:
             st.warning("⛔ Importez le fichier **Balance** dans l'onglet **📁 Import fichiers**.")
-    sub_rejets, sub_eraz, sub_audit, sub_matrice, sub_synthese, sub_synchro = st.tabs([
-        "🚫 Rejetees", "🧹 Suppressions", "🔎 Mises a jour", "📋 Matrice", "📊 Synthese injection", "🚀 Injection"
-    ])
+    else:
+        _gate_matrice = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105')) and bool(st.session_state.get('imp_file_balance'))
+        if not _gate_matrice:
+            if not st.session_state.get('company_id_105'):
+                st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**).")
+            elif not st.session_state.get('imp_file_balance'):
+                st.warning("⛔ Importez le fichier **Balance** dans l'onglet **📁 Import fichiers**.")
+    # En hors-ligne, l'onglet "Suppressions" n'a pas de sens (rien a comparer cote API).
+    if _offline_mode:
+        sub_rejets, sub_audit, sub_matrice, sub_synthese, sub_synchro = st.tabs([
+            "🚫 Rejetees", "🔎 Mises a jour", "📋 Matrice", "📊 Synthese", "📥 Telecharger gabarits"
+        ])
+        sub_eraz = st.empty()  # placeholder non rendu
+    else:
+        sub_rejets, sub_eraz, sub_audit, sub_matrice, sub_synthese, sub_synchro = st.tabs([
+            "🚫 Rejetees", "🧹 Suppressions", "🔎 Mises a jour", "📋 Matrice", "📊 Synthese injection", "🚀 Injection"
+        ])
     # Reassigner m6/m7 pour que le code existant ecrive dans les bons sous-onglets
     m6 = sub_synthese
     m7 = sub_synchro
@@ -1751,7 +1838,8 @@ if _connected and mod_compta:
         else:
             st.info("Aucun rejet")
 
-    with sub_eraz:
+    if not _offline_mode:
+     with sub_eraz:
         has_headers = bool(st.session_state.token_headers_105)
         prot = st.session_state.prot_105
 
@@ -1894,7 +1982,8 @@ if _connected and mod_compta:
                 st.success("Aucun orphelin détecté")
 
 # --- m6 : Synthèse (vérification avant synchro) ---
-with m6:
+if (_api_connected or _offline_mode) and mod_compta:
+ with m6:
     if not st.session_state.audit_matrix_105.empty:
         df_m = st.session_state.audit_matrix_105
         eraz = st.session_state.eraz_counts
@@ -2095,11 +2184,111 @@ with m6:
         st.info("Lancez l'analyse d'abord (onglet Balance)")
 
 # --- m7 : Synchro (DELETE + PATCH + CREATE, dernier onglet) ---
-with m7:
-    df_sync = st.session_state.audit_matrix_105
-    has_headers = bool(st.session_state.token_headers_105)
+if (_api_connected or _offline_mode) and mod_compta:
+ with m7:
+    if _offline_mode:
+        # En hors-ligne : pas d'API. On propose 5 telechargements de gabarits.
+        df_off = st.session_state.audit_matrix_105
+        if df_off.empty:
+            st.info("Lancez l'analyse d'abord (onglet 📁 Import fichiers, fichier Balance).")
+        else:
+            st.subheader("📥 Telechargement des 5 gabarits Evoliz")
+            st.warning("⚠️ **Avant l'import dans Evoliz** : remettez a zero les parametres "
+                       "(Plan comptable, Classifications, Affectations diverses) dans le dossier cible "
+                       "pour eviter les doublons avec les donnees preexistantes qui feraient echouer l'import.")
+            st.caption("La matrice ci-dessus pilote le contenu : seuls les comptes/flux marques '➕' sont inclus. Les '—' sont exclus.")
+            # Comptes : uniquement les lignes ou la colonne COMPTE est "➕"
+            _comptes_a_creer = df_off[df_off["COMPTE"].astype(str).str.strip() == "➕"]
+            _comptes_export = pd.DataFrame({
+                "COMPTE_CODE": _comptes_a_creer["N°"].astype(str),
+                "LIBELLE":     _comptes_a_creer.get("Libellé", ""),
+            })
+            # Flux : toutes les lignes; chaque flux n'est inclus que s'il vaut "➕"
+            _flux_export = pd.DataFrame({
+                "COMPTE_CODE": df_off["N°"].astype(str),
+                "LIBELLE":     df_off["LibFlux"] if "LibFlux" in df_off.columns else df_off.get("Libellé", ""),
+                "ACHAT":       df_off.get("ACHAT", pd.Series("—", index=df_off.index)).astype(str).str.strip() == "➕",
+                "VENTE":       df_off.get("VENTE", pd.Series("—", index=df_off.index)).astype(str).str.strip() == "➕",
+                "ENTRÉE BQ":   df_off.get("ENTRÉE BQ", pd.Series("—", index=df_off.index)).astype(str).str.strip() == "➕",
+                "SORTIE BQ":   df_off.get("SORTIE BQ", pd.Series("—", index=df_off.index)).astype(str).str.strip() == "➕",
+                "TVA":         df_off.get("TVA", pd.Series("", index=df_off.index)),
+            })
+            # Aperçu nb lignes par gabarit
+            _n_comptes  = len(_comptes_export)
+            _n_achats   = int(_flux_export["ACHAT"].sum())
+            _n_ventes   = int(_flux_export["VENTE"].sum())
+            _n_entree   = int(_flux_export["ENTRÉE BQ"].sum())
+            _n_sortie   = int(_flux_export["SORTIE BQ"].sum())
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric("Comptes",        _n_comptes)
+            mc2.metric("Classif achats", _n_achats)
+            mc3.metric("Classif ventes", _n_ventes)
+            mc4.metric("Entree BQ",      _n_entree)
+            mc5.metric("Sortie BQ",      _n_sortie)
 
-    if not df_sync.empty and has_headers:
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "📥 Comptes comptables",
+                eo.make_xlsx("comptes", eo.map_comptes(_comptes_export)),
+                file_name="1_Comptes_comptables.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_off_compta_1", use_container_width=True, disabled=_n_comptes == 0,
+            )
+            c2.download_button(
+                "📥 Classifications d'achats",
+                eo.make_xlsx("classif_achats", eo.map_classif_achats(_flux_export, default_tva_rate=tva_achat_rate)),
+                file_name="2_Classifications_achats.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_off_compta_2", use_container_width=True, disabled=_n_achats == 0,
+            )
+            c3, c4 = st.columns(2)
+            c3.download_button(
+                "📥 Classifications de ventes",
+                eo.make_xlsx("classif_ventes", eo.map_classif_ventes(_flux_export)),
+                file_name="3_Classifications_ventes.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_off_compta_3", use_container_width=True, disabled=_n_ventes == 0,
+            )
+            c4.download_button(
+                "📥 Affectations entree banque",
+                eo.make_xlsx("affect_entree", eo.map_affect_entree(_flux_export)),
+                file_name="4_Affectations_entree_banque.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_off_compta_4", use_container_width=True, disabled=_n_entree == 0,
+            )
+            c5, c6 = st.columns(2)
+            c5.download_button(
+                "📥 Affectations sortie banque",
+                eo.make_xlsx("affect_sortie", eo.map_affect_sortie(_flux_export)),
+                file_name="5_Affectations_sortie_banque.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_off_compta_5", use_container_width=True, disabled=_n_sortie == 0,
+            )
+            # Zip global : reconstruit avec les vraies vues filtrees
+            _zip_items = [
+                ("1_Comptes_comptables.xlsx",         eo.make_xlsx("comptes",        eo.map_comptes(_comptes_export))),
+                ("2_Classifications_achats.xlsx",     eo.make_xlsx("classif_achats", eo.map_classif_achats(_flux_export, default_tva_rate=tva_achat_rate))),
+                ("3_Classifications_ventes.xlsx",     eo.make_xlsx("classif_ventes", eo.map_classif_ventes(_flux_export))),
+                ("4_Affectations_entree_banque.xlsx", eo.make_xlsx("affect_entree",  eo.map_affect_entree(_flux_export))),
+                ("5_Affectations_sortie_banque.xlsx", eo.make_xlsx("affect_sortie",  eo.map_affect_sortie(_flux_export))),
+            ]
+            c6.download_button(
+                "📦 Tout (zip)",
+                eo.make_zip(_zip_items),
+                file_name="Gabarits_Evoliz_Comptabilite.zip",
+                mime="application/zip",
+                key="dl_off_compta_zip", use_container_width=True, type="primary",
+            )
+        # En offline, on n'execute pas le code synchro API (API HEADERS absents)
+        df_sync = pd.DataFrame()
+        has_headers = False
+    else:
+        df_sync = st.session_state.audit_matrix_105
+        has_headers = bool(st.session_state.token_headers_105)
+
+    if _offline_mode:
+        pass  # rendu deja fait dans la branche offline ci-dessus
+    elif not df_sync.empty and has_headers:
         # Option de filtrage
         sync_scope = st.radio("Périmètre de synchronisation",
                               ["🌐 Tout", "🏷️ Ventes uniquement (comptes 7xx)"],
@@ -2974,11 +3163,16 @@ def _auto_map_columns(src_columns):
     return mapping
 
 # --- Onglet Injection Clients ---
-if _connected and mod_clients:
+if (_api_connected or _offline_mode) and mod_clients:
  with m_cli:
-    _gate_cli = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
-    if not _gate_cli:
-        st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
+    if _offline_mode:
+        _gate_cli = bool(st.session_state.get("imp_file_clients"))
+        if not _gate_cli:
+            st.info("Importez d'abord un fichier clients dans l'onglet 📁 Import fichiers.")
+    else:
+        _gate_cli = bool(st.session_state.get('company_id_105')) and bool(st.session_state.get('token_headers_105'))
+        if not _gate_cli:
+            st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     _is_supplier = False
     _entity_label = "clients"
     _entity_api = "clients"
@@ -4082,10 +4276,26 @@ if _connected and mod_clients:
             if _final_changed:
                 st.session_state["meg_df_clients"] = df_preview_c
 
-        # --- Injection ---
+        # --- Injection / Telechargement ---
         st.divider()
-        st.subheader(f"🚀 Injection {_entity_label} dans Evoliz")
-        inject_btn = st.button(f"🚀 Injecter les {_entity_label}", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api or bool(_missing_rows))
+        if _offline_mode:
+            st.subheader(f"📥 Telechargement du gabarit Evoliz {_entity_label}")
+            st.warning(f"⚠️ **Avant l'import dans Evoliz** : videz la liste des {_entity_label} dans le dossier cible "
+                       "pour eviter les doublons avec les donnees preexistantes qui feraient echouer l'import.")
+            _gab_rows = eo.map_clients(df_preview_c)
+            st.caption(f"{len(_gab_rows)} {_entity_label} pret(s) a etre exporte(s).")
+            st.download_button(
+                f"📥 Telecharger le gabarit Evoliz {_entity_label} (.xlsx)",
+                data=eo.make_xlsx("clients", _gab_rows),
+                file_name=f"Gabarit_Evoliz_{_entity_label.capitalize()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_off_clients", type="primary", use_container_width=True,
+                disabled=bool(_missing_rows) or len(_gab_rows) == 0,
+            )
+            inject_btn = False
+        else:
+            st.subheader(f"🚀 Injection {_entity_label} dans Evoliz")
+            inject_btn = st.button(f"🚀 Injecter les {_entity_label}", type="primary", use_container_width=True, key="btn_inject_clients", disabled=not has_api or bool(_missing_rows))
         if inject_btn and has_api:
             headers = st.session_state.token_headers_105; cid = st.session_state.company_id_105
             # URLs avec fallback : prefixe en primaire, sans prefixe en secours (cas company_users avec cid invalide)
@@ -4195,9 +4405,12 @@ if _connected and mod_clients:
 
 
 # --- Onglet Injection Fournisseurs ---
-if _connected and mod_fournisseurs:
+if (_api_connected or _offline_mode) and mod_fournisseurs:
  with m_four:
-    if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
+    if _offline_mode:
+        if not st.session_state.get("imp_file_fournisseurs"):
+            st.info("Importez d'abord un fichier fournisseurs dans l'onglet 📁 Import fichiers.")
+    elif not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
     st.subheader("🏭 Injection Fournisseurs")
     st.caption("1. Importez un fichier fournisseurs  2. Mapping colonnes  3. Consolidation Evoliz  4. Injection")
@@ -4298,53 +4511,52 @@ if _connected and mod_fournisseurs:
             _four_file_id = f_meg_four.name + str(f_meg_four.size)
             _four_already = st.session_state.get("_four_consol_id") == _four_file_id
             _four_auto = not _four_already
-            _four_manual = st.button("🔄 Consolider avec Evoliz", use_container_width=True, key="btn_consol_four")
+            _btn_label = "🔄 Consolider avec Evoliz" if has_api_f else "🔄 Consolider"
+            _four_manual = st.button(_btn_label, use_container_width=True, key="btn_consol_four")
 
-            if has_api_f and (_four_auto or _four_manual):
+            if (has_api_f or _offline_mode) and (_four_auto or _four_manual):
                 st.session_state["_four_consol_id"] = _four_file_id
-                headers_f = st.session_state.token_headers_105
-                cid_f = st.session_state.company_id_105
-                if not cid_f:
-                    st.error("Aucun dossier sélectionné.")
-                    st.stop()
+                headers_f = st.session_state.token_headers_105 if has_api_f else None
+                cid_f = st.session_state.company_id_105 if has_api_f else None
 
-                with st.spinner("Lecture des fournisseurs Evoliz..."):
-                    ev_four = []; ev_f_by_name = {}
-                    # URL avec fallback (mono/multi indifferent)
-                    _url_f_pri = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
-                    _url_f_fb = "https://www.evoliz.io/api/v1/suppliers"
-                    url_four = _url_f_pri
-                    try:
-                        _rt = requests.get(_url_f_pri, headers=headers_f, params={"per_page": 1, "page": 1}, timeout=10)
-                        if _rt.status_code in (403, 404):
+                ev_four = []; ev_f_by_name = {}
+                if has_api_f and cid_f:
+                    with st.spinner("Lecture des fournisseurs Evoliz..."):
+                        # URL avec fallback (mono/multi indifferent)
+                        _url_f_pri = f"https://www.evoliz.io/api/v1/companies/{cid_f}/suppliers"
+                        _url_f_fb = "https://www.evoliz.io/api/v1/suppliers"
+                        url_four = _url_f_pri
+                        try:
+                            _rt = requests.get(_url_f_pri, headers=headers_f, params={"per_page": 1, "page": 1}, timeout=10)
+                            if _rt.status_code in (403, 404):
+                                url_four = _url_f_fb
+                        except Exception:
                             url_four = _url_f_fb
-                    except Exception:
-                        url_four = _url_f_fb
-                    page_f = 1
-                    while True:
-                        r_f = requests.get(url_four, headers=headers_f, params={"per_page": 100, "page": page_f}, timeout=15)
-                        if r_f.status_code != 200: break
-                        d_f = r_f.json()
-                        for it in d_f.get("data", []):
-                            adr = it.get("address") or {}
-                            entry_f = {
-                                "supplierid": it.get("supplierid"), "code": (it.get("code") or "").strip(),
-                                "name": (it.get("name") or "").strip(),
-                                "business_number": (it.get("business_number") or ""),
-                                "business_identification_number": (it.get("business_identification_number") or ""),
-                                "vat_number": (it.get("vat_number") or ""),
-                                "legalform": (it.get("legal_status") or {}).get("label", "") if isinstance(it.get("legal_status"), dict) else "",
-                                "activity_number": (it.get("activity_number") or ""),
-                                "phone": (it.get("phone") or ""), "mobile": (it.get("mobile") or ""),
-                                "fax": (it.get("fax") or ""), "website": (it.get("website") or ""),
-                                "addr": (adr.get("addr") or ""), "postcode": (adr.get("postcode") or ""),
-                                "town": (adr.get("town") or ""), "iso2": (adr.get("iso2") or ""),
-                            }
-                            ev_four.append(entry_f)
-                            n_f = norm_piv(entry_f["name"])
-                            if n_f: ev_f_by_name[n_f] = entry_f
-                        if page_f >= d_f.get("meta", {}).get("last_page", 1): break
-                        page_f += 1
+                        page_f = 1
+                        while True:
+                            r_f = requests.get(url_four, headers=headers_f, params={"per_page": 100, "page": page_f}, timeout=15)
+                            if r_f.status_code != 200: break
+                            d_f = r_f.json()
+                            for it in d_f.get("data", []):
+                                adr = it.get("address") or {}
+                                entry_f = {
+                                    "supplierid": it.get("supplierid"), "code": (it.get("code") or "").strip(),
+                                    "name": (it.get("name") or "").strip(),
+                                    "business_number": (it.get("business_number") or ""),
+                                    "business_identification_number": (it.get("business_identification_number") or ""),
+                                    "vat_number": (it.get("vat_number") or ""),
+                                    "legalform": (it.get("legal_status") or {}).get("label", "") if isinstance(it.get("legal_status"), dict) else "",
+                                    "activity_number": (it.get("activity_number") or ""),
+                                    "phone": (it.get("phone") or ""), "mobile": (it.get("mobile") or ""),
+                                    "fax": (it.get("fax") or ""), "website": (it.get("website") or ""),
+                                    "addr": (adr.get("addr") or ""), "postcode": (adr.get("postcode") or ""),
+                                    "town": (adr.get("town") or ""), "iso2": (adr.get("iso2") or ""),
+                                }
+                                ev_four.append(entry_f)
+                                n_f = norm_piv(entry_f["name"])
+                                if n_f: ev_f_by_name[n_f] = entry_f
+                            if page_f >= d_f.get("meta", {}).get("last_page", 1): break
+                            page_f += 1
 
                 # Construction liste consolidée
                 consol_four = []; seen_four_ids = set()
@@ -4702,10 +4914,26 @@ if _connected and mod_fournisseurs:
                                     consol_four[_i][_col] = _new_v
                                     st.session_state["_four_consol"] = consol_four
 
-                # Injection
+                # Injection / Telechargement
                 st.divider()
-                st.subheader("🚀 Injection fournisseurs dans Evoliz")
-                inject_four_btn = st.button("🚀 Injecter les fournisseurs", type="primary", use_container_width=True, key="btn_inject_four", disabled=not has_api_f or bool(_four_missing))
+                if _offline_mode:
+                    st.subheader("📥 Telechargement du gabarit Evoliz Fournisseurs")
+                    st.warning("⚠️ **Avant l'import dans Evoliz** : videz la liste des fournisseurs dans le dossier cible "
+                               "pour eviter les doublons avec les donnees preexistantes qui feraient echouer l'import.")
+                    _gab_rows_f = eo.map_fournisseurs(consol_four)
+                    st.caption(f"{len(_gab_rows_f)} fournisseur(s) pret(s) a etre exporte(s).")
+                    st.download_button(
+                        "📥 Telecharger le gabarit Evoliz Fournisseurs (.xlsx)",
+                        data=eo.make_xlsx("fournisseurs", _gab_rows_f),
+                        file_name="Gabarit_Evoliz_Fournisseurs.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_off_fournisseurs", type="primary", use_container_width=True,
+                        disabled=bool(_four_missing) or len(_gab_rows_f) == 0,
+                    )
+                    inject_four_btn = False
+                else:
+                    st.subheader("🚀 Injection fournisseurs dans Evoliz")
+                    inject_four_btn = st.button("🚀 Injecter les fournisseurs", type="primary", use_container_width=True, key="btn_inject_four", disabled=not has_api_f or bool(_four_missing))
                 if inject_four_btn and has_api_f:
                     headers_f = st.session_state.token_headers_105; cid_f = st.session_state.company_id_105
                     # URL avec fallback (mono/multi indifferent)
@@ -4773,7 +5001,11 @@ if _connected and mod_fournisseurs:
 
 
 # --- Onglet Bascule Factures ---
-if _connected and mod_factures:
+if _offline_mode and mod_factures:
+    with m_fac:
+        eo.render_factures_offline(st, st.session_state.get("imp_file_factures"))
+
+if _api_connected and mod_factures:
  with m_fac:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
@@ -4875,7 +5107,11 @@ if _connected and mod_factures:
                 st.download_button("Telecharger le ZIP",data=zb.getvalue(),file_name="Gabarit_Facture_Paiement_Avoir.zip",mime="application/zip",key="dl_meg_fac")
 
 # --- Onglet Bascule Articles ---
-if _connected and mod_articles:
+if _offline_mode and mod_articles:
+    with m_art:
+        eo.render_articles_offline(st, st.session_state.get("imp_file_articles"))
+
+if _api_connected and mod_articles:
  with m_art:
     if not (st.session_state.get('company_id_105') and st.session_state.get('token_headers_105')):
         st.warning("⛔ Connectez-vous a l'API et selectionnez un dossier (onglet **🔑 Connexion API**) avant d'utiliser cet onglet.")
