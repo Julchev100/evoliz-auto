@@ -4390,7 +4390,11 @@ if (_api_connected or _offline_mode) and mod_clients:
                 tva_v = to_clean_str(row.iloc[ci_h["TVA intracommunautaire"]]) if ci_h.get("TVA intracommunautaire") is not None else ""
                 payload["vat_number"] = tva_v if tva_v and tva_v != "NC" else "N/C"
                 siret_v = to_clean_str(row.iloc[ci_h["Siret"]]) if ci_h.get("Siret") is not None else ""
-                payload["business_number"] = siret_v if siret_v and siret_v != "NC" else "N/C"
+                # Evoliz API : business_number doit etre absent ou exactement 14 chiffres (pattern ^\d{14}$).
+                # Toute valeur partielle ou non-numerique (ex. "N/C") declenche un HTTP 400. On omet le champ.
+                _siret_digits = re.sub(r"\D", "", siret_v) if siret_v else ""
+                if len(_siret_digits) == 14:
+                    payload["business_number"] = _siret_digits
                 for fld, ak in [("Forme juridique","legalform"),("Siren","business_identification_number"),("APE / NAF","activity_number"),("Telephone","phone"),("Portable","mobile"),("Fax","fax"),("Site web","website"),("Commentaires","comment")]:
                     v = to_clean_str(row.iloc[ci_h[fld]]) if ci_h.get(fld) is not None else ""
                     if v and v != "NC": payload[ak] = v
@@ -5011,7 +5015,10 @@ if (_api_connected or _offline_mode) and mod_fournisseurs:
                         tva_v = cr.get("TVA intracommunautaire", "")
                         payload_f["vat_number"] = tva_v if tva_v and tva_v != "NC" else "N/C"
                         siret_v = cr.get("Siret", "")
-                        payload_f["business_number"] = siret_v if siret_v and siret_v != "NC" else "N/C"
+                        # Evoliz API : business_number doit etre absent ou exactement 14 chiffres.
+                        _siret_digits = re.sub(r"\D", "", siret_v) if siret_v else ""
+                        if len(_siret_digits) == 14:
+                            payload_f["business_number"] = _siret_digits
                         for fld, ak in [("Forme juridique","legalform"),("APE / NAF","activity_number"),
                                         ("Telephone","phone"),("Portable","mobile"),("Fax","fax"),
                                         ("Site web","website"),("Commentaires","comment")]:
