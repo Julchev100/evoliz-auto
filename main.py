@@ -3290,7 +3290,7 @@ if (_api_connected or _offline_mode) and mod_clients:
             required_set = {"Societe / Nom", "Code", "Code postal", "Ville", "Code pays (ISO 2)"}
 
         # Recalculer le mapping si fichier change ou si colonnes ont change (ajout auto)
-        current_cols_sig = ",".join(df_src.columns.tolist())
+        current_cols_sig = ",".join(map(str, df_src.columns.tolist()))
         if (st.session_state.get("meg_last_file") != f_meg_cli.name
                 or st.session_state.get("meg_last_cols_sig") != current_cols_sig):
             # Auto-detect : pour chaque colonne source, quel champ Evoliz ?
@@ -4456,7 +4456,7 @@ if (_api_connected or _offline_mode) and mod_fournisseurs:
                 "Classification", "Code classification", "Commentaires"]
 
             # Auto-mapping
-            _four_file_sig = f_meg_four.name + ",".join(df_four.columns.tolist())
+            _four_file_sig = f_meg_four.name + ",".join(map(str, df_four.columns.tolist()))
             if st.session_state.get("_four_last_sig") != _four_file_sig:
                 fwd_f = _auto_map_columns(df_four.columns.tolist())
                 # Adapter les noms : "Societe / Nom" -> "Raison sociale"
