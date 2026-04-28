@@ -87,6 +87,41 @@ def get_correct_id(item, endpoint):
         return item.get('accountid') or item.get('id')
     return item.get('id')
 
+def _refresh_evoliz_token():
+    """Re-login Evoliz avec les credentials stockes en session.
+    Met a jour st.session_state.token_headers_105. True si succes."""
+    pk = st.session_state.get("_evoliz_pk")
+    sk = st.session_state.get("_evoliz_sk")
+    if not pk or not sk:
+        return False
+    try:
+        r = requests.post("https://www.evoliz.io/api/login",
+                          json={"public_key": pk, "secret_key": sk}, timeout=15)
+        if r.status_code == 200:
+            tok = r.json().get("access_token")
+            if tok:
+                st.session_state.token_headers_105 = {
+                    "Authorization": f"Bearer {tok}",
+                    "Accept": "application/json",
+                }
+                return True
+    except Exception:
+        pass
+    return False
+
+def _authed_request(method, url, **kwargs):
+    """requests.<method> avec re-login automatique sur 401.
+    Ignore 'headers' passe en kwarg : utilise toujours st.session_state.token_headers_105
+    pour s'assurer qu'apres un refresh tous les appels utilisent le nouveau token."""
+    kwargs.pop("headers", None)
+    h = st.session_state.get("token_headers_105", {})
+    r = requests.request(method, url, headers=h, **kwargs)
+    if r.status_code == 401 and _refresh_evoliz_token():
+        h = st.session_state.get("token_headers_105", {})
+        r = requests.request(method, url, headers=h, **kwargs)
+    return r
+
+
 def fetch_evoliz_data(endpoint, headers, company_id=None):
     results = {}
     # URL avec prefixe en primaire, sans prefixe en fallback (cas company_users avec cid invalide)
@@ -182,8 +217,8 @@ def has_movement_debit_credit(row, flux_cols):
 
 def inject_account(code, label, headers):
     try:
-        r = requests.post("https://www.evoliz.io/api/v1/accounts",
-                          headers=headers, json={"code": code, "label": label}, timeout=15)
+        r = _authed_request("POST", "https://www.evoliz.io/api/v1/accounts",
+                          json={"code": code, "label": label}, timeout=15)
         if r.status_code in (200, 201):
             return True, r.json()
         # Si le compte existe déjà, considérer comme succès
@@ -204,7 +239,7 @@ def patch_evoliz_item(category, item_id, payload, headers, company_id=None):
     last_err = None
     for url in urls_to_try:
         try:
-            r = requests.patch(url, headers=headers, json=payload, timeout=15)
+            r = _authed_request("PATCH", url, json=payload, timeout=15)
             if r.status_code in (200, 204):
                 return True, r.json() if r.status_code == 200 else "OK"
             last_err = f"HTTP {r.status_code}: {r.text[:200]}"
@@ -236,15 +271,15 @@ def inject_flux(flux_type, code, label, headers, vat_id=None, acc_id=None, vat_r
     else:
         url = f"https://www.evoliz.io/api/v1/{endpoint}"
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=15)
+        r = _authed_request("POST", url, json=payload, timeout=15)
         if r.status_code in (200, 201):
             resp = r.json()
             resp['_sent'] = _payload_debug
             return True, resp
         # Fallback : si 403/404 en company-scoped, re-essayer sans le prefixe
         if r.status_code in (403, 404) and company_id:
-            r2 = requests.post(f"https://www.evoliz.io/api/v1/{endpoint}",
-                                headers=headers, json=payload, timeout=15)
+            r2 = _authed_request("POST", f"https://www.evoliz.io/api/v1/{endpoint}",
+                                json=payload, timeout=15)
             if r2.status_code in (200, 201):
                 resp = r2.json()
                 resp['_sent'] = _payload_debug
@@ -273,7 +308,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
     last_status = None; last_body = ""
     for url in urls:
         try:
-            r = requests.delete(url, headers=headers, timeout=15)
+            r = _authed_request("DELETE", url, timeout=15)
             last_status = r.status_code; last_body = r.text
             if r.status_code in (200, 204):
                 return True, "Supprimé"
@@ -287,7 +322,7 @@ def delete_evoliz_item(category, item_id, headers, company_id=None):
     if category != "COMPTE":
         for url in urls:
             try:
-                r2 = requests.patch(url, headers=headers,
+                r2 = _authed_request("PATCH", url,
                                     json={"enabled": False}, timeout=15)
                 if r2.status_code in (200, 204):
                     return True, "Désactivé (enabled=false)"
@@ -603,7 +638,10 @@ if _is_tiers and not _tiers_connected and not _offline_mode:
                 login_data = r_log.json()
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
-                # Effacer les cles de la memoire
+                # Conserver PK/SK en session pour permettre le refresh auto du token sur 401
+                st.session_state["_evoliz_pk"] = pk_105
+                st.session_state["_evoliz_sk"] = sk_105
+                # Effacer les cles des variables locales
                 pk_105 = ""; sk_105 = ""
                 # Detecter cid (meme logique que le login principal)
                 _scopes = login_data.get("scopes", []) or []
@@ -1086,7 +1124,7 @@ else:
     if _keys_changed:
         # Vider toutes les donnees API/session relatives a l'ancien token
         for _k in (
-            'token_headers_105', 'company_id_105', 'companies_list',
+            'token_headers_105', 'company_id_105', 'companies_list', '_evoliz_pk', '_evoliz_sk',
             'ev_acc_105', 'ev_data_105', 'ev_clients_raw', 'ev_articles_raw', 'ev_invoices_raw',
             '_key_mode', 'eraz_log', 'sync_log',
             '_art_consol', '_art_consol_stats', '_art_sale_cl', '_art_consol_id',
@@ -1129,7 +1167,7 @@ else:
     # Bouton déconnexion si déjà connecté
     if st.session_state.token_headers_105:
         if st.button("🔌 Se déconnecter / changer de clés", key="btn_disconnect"):
-            for _k in ('token_headers_105', 'company_id_105', 'companies_list',
+            for _k in ('token_headers_105', 'company_id_105', 'companies_list', '_evoliz_pk', '_evoliz_sk',
                         'ev_acc_105', 'ev_data_105', 'ev_clients_raw', 'ev_articles_raw', 'ev_invoices_raw'):
                 if _k in st.session_state:
                     st.session_state[_k] = type(st.session_state[_k])() if isinstance(st.session_state[_k], (dict, list, set)) else None
@@ -1154,8 +1192,13 @@ else:
                 h = {"Authorization": f"Bearer {login_data.get('access_token')}", "Accept": "application/json"}
                 st.session_state.token_headers_105 = h
 
-                # --- SECURITE : effacer immediatement les cles API de la memoire ---
-                # PK + SK ne sont plus necessaires apres login (seul le token est utilise)
+                # Conserver PK/SK en session pour permettre le refresh auto du token sur 401
+                # (necessaire pour les batchs longs depassant la duree de vie du Bearer)
+                st.session_state["_evoliz_pk"] = pk_105
+                st.session_state["_evoliz_sk"] = sk_105
+
+                # --- SECURITE : effacer immediatement les cles API des variables locales ---
+                # PK + SK conserves en session pour le refresh, mais retires des widgets
                 pk_105 = ""; sk_105 = ""
                 for _k in ("pk_105", "sk_105", "_prev_pk_105", "_prev_sk_105"):
                     if _k in st.session_state:
