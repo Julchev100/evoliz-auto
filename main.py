@@ -4408,7 +4408,7 @@ if (_api_connected or _offline_mode) and mod_clients:
                 else:
                     r = _http_with_fallback("POST", "", _payload)
                     action = "➕ Creation"
-                return (_idx, _code, _nom, action, r.status_code, r.text[:80])
+                return (_idx, _code, _nom, action, r.status_code, r.text[:400])
 
             progress = st.progress(0.0, text=f"Injection — 0 / {len(_tasks)}")
             _n_done = 0
