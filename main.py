@@ -1783,6 +1783,7 @@ if (_api_connected or _offline_mode) and mod_compta:
             st.session_state.audit_matrix_105 = st.data_editor(
                 st.session_state.audit_matrix_105,
                 use_container_width=True, hide_index=True,
+                key="audit_matrix_editor",
                 disabled=["N°", "Libellé", "TVA",
                            "_vat_id", "_patch_cat", "_patch_id", "_patch_payload", "_patch_detail",
                            "_patch_ACHAT", "_patch_VENTE", "_patch_ENTRÉE BQ", "_patch_SORTIE BQ"],
